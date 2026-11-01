@@ -39,21 +39,6 @@ func (q *Queries) CleanupTokens(ctx context.Context, before time.Time) (int64, e
 	return result.RowsAffected(), nil
 }
 
-const consumeRefreshToken = `-- name: ConsumeRefreshToken :execrows
-UPDATE auth_tokens
-SET revoked_at = now(), revoked_reason = 'refresh'
-WHERE hash = $1 AND type = 2 AND revoked_at IS NULL AND expires_at > now()
-`
-
-// Zero rows means the token was already used or expired.
-func (q *Queries) ConsumeRefreshToken(ctx context.Context, hash string) (int64, error) {
-	result, err := q.db.Exec(ctx, consumeRefreshToken, hash)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
-}
-
 const createLoginSession = `-- name: CreateLoginSession :one
 SELECT s.action::text                                                               AS action,
        s.family_uuid::uuid                                                          AS family_uuid,
@@ -141,7 +126,14 @@ SELECT
     r.uuid               AS refresh_uuid,
     r.hash               AS refresh_hash,
     r.expires_at         AS refresh_expires_at,
-    r.revoked_at         AS refresh_revoked_at
+    r.revoked_at         AS refresh_revoked_at,
+    ARRAY(
+        SELECT DISTINCT rp.permission_code
+        FROM user_roles ur
+        JOIN role_permissions rp ON rp.role_id = ur.role_id
+        WHERE ur.user_id = u.id
+        ORDER BY rp.permission_code
+    )::text[]            AS permissions
 FROM token tk
 JOIN users u ON u.id = tk.user_id AND u.deleted_at IS NULL
 JOIN access_token a ON true
@@ -169,9 +161,11 @@ type GetSessionByHashRow struct {
 	RefreshHash      string      `db:"refresh_hash" json:"refresh_hash"`
 	RefreshExpiresAt time.Time   `db:"refresh_expires_at" json:"refresh_expires_at"`
 	RefreshRevokedAt *time.Time  `db:"refresh_revoked_at" json:"refresh_revoked_at"`
+	Permissions      []string    `db:"permissions" json:"permissions"`
 }
 
-// Any token hash of a family -> its user and latest token pair.
+// Any token hash of a family -> its user, their permission codes and latest token pair. The codes
+// come with the session so an authenticated request needs one query, not two.
 func (q *Queries) GetSessionByHash(ctx context.Context, hash string) (GetSessionByHashRow, error) {
 	row := q.db.QueryRow(ctx, getSessionByHash, hash)
 	var i GetSessionByHashRow
@@ -196,6 +190,7 @@ func (q *Queries) GetSessionByHash(ctx context.Context, hash string) (GetSession
 		&i.RefreshHash,
 		&i.RefreshExpiresAt,
 		&i.RefreshRevokedAt,
+		&i.Permissions,
 	)
 	return i, err
 }
@@ -237,42 +232,6 @@ func (q *Queries) GetTokenByHash(ctx context.Context, hash string) (GetTokenByHa
 		&i.RevokedReason,
 	)
 	return i, err
-}
-
-const issueTokenPair = `-- name: IssueTokenPair :exec
-INSERT INTO auth_tokens (user_id, family_uuid, type, hash, expires_at, ip_address, user_agent, device_id)
-VALUES
-    ($1, $2, 1, $3, $4,
-     $5, $6, $7),
-    ($1, $2, 2, $8, $9,
-     $5, $6, $7)
-`
-
-type IssueTokenPairParams struct {
-	UserID           int64       `db:"user_id" json:"user_id"`
-	FamilyUUID       uuid.UUID   `db:"family_uuid" json:"family_uuid"`
-	AccessHash       string      `db:"access_hash" json:"access_hash"`
-	AccessExpiresAt  time.Time   `db:"access_expires_at" json:"access_expires_at"`
-	IPAddress        *netip.Addr `db:"ip_address" json:"ip_address"`
-	UserAgent        *string     `db:"user_agent" json:"user_agent"`
-	DeviceID         *string     `db:"device_id" json:"device_id"`
-	RefreshHash      string      `db:"refresh_hash" json:"refresh_hash"`
-	RefreshExpiresAt time.Time   `db:"refresh_expires_at" json:"refresh_expires_at"`
-}
-
-func (q *Queries) IssueTokenPair(ctx context.Context, arg IssueTokenPairParams) error {
-	_, err := q.db.Exec(ctx, issueTokenPair,
-		arg.UserID,
-		arg.FamilyUUID,
-		arg.AccessHash,
-		arg.AccessExpiresAt,
-		arg.IPAddress,
-		arg.UserAgent,
-		arg.DeviceID,
-		arg.RefreshHash,
-		arg.RefreshExpiresAt,
-	)
-	return err
 }
 
 const listActiveSessions = `-- name: ListActiveSessions :many
@@ -318,6 +277,84 @@ func (q *Queries) ListActiveSessions(ctx context.Context, userID int64) ([]ListA
 		return nil, err
 	}
 	return items, nil
+}
+
+const refreshSession = `-- name: RefreshSession :one
+SELECT s.status::text                                                         AS status,
+       COALESCE(s.family_uuid, '00000000-0000-0000-0000-000000000000')::uuid  AS family_uuid,
+       COALESCE(s.user_uuid, '00000000-0000-0000-0000-000000000000')::uuid    AS user_uuid
+FROM f_auth_refresh_session(
+    $1::text,
+    $2::text,
+    $3::inet,
+    $4::text,
+    $5::text,
+    $6::timestamptz,
+    $7::text,
+    $8::timestamptz
+) AS s(status, family_uuid, user_uuid)
+`
+
+type RefreshSessionParams struct {
+	Hash             string      `db:"hash" json:"hash"`
+	DeviceID         *string     `db:"device_id" json:"device_id"`
+	IPAddress        *netip.Addr `db:"ip_address" json:"ip_address"`
+	UserAgent        *string     `db:"user_agent" json:"user_agent"`
+	AccessHash       string      `db:"access_hash" json:"access_hash"`
+	AccessExpiresAt  time.Time   `db:"access_expires_at" json:"access_expires_at"`
+	RefreshHash      string      `db:"refresh_hash" json:"refresh_hash"`
+	RefreshExpiresAt time.Time   `db:"refresh_expires_at" json:"refresh_expires_at"`
+}
+
+type RefreshSessionRow struct {
+	Status     string    `db:"status" json:"status"`
+	FamilyUUID uuid.UUID `db:"family_uuid" json:"family_uuid"`
+	UserUUID   uuid.UUID `db:"user_uuid" json:"user_uuid"`
+}
+
+func (q *Queries) RefreshSession(ctx context.Context, arg RefreshSessionParams) (RefreshSessionRow, error) {
+	row := q.db.QueryRow(ctx, refreshSession,
+		arg.Hash,
+		arg.DeviceID,
+		arg.IPAddress,
+		arg.UserAgent,
+		arg.AccessHash,
+		arg.AccessExpiresAt,
+		arg.RefreshHash,
+		arg.RefreshExpiresAt,
+	)
+	var i RefreshSessionRow
+	err := row.Scan(&i.Status, &i.FamilyUUID, &i.UserUUID)
+	return i, err
+}
+
+const revokeAllByHash = `-- name: RevokeAllByHash :one
+WITH token AS (
+    SELECT t.user_id FROM auth_tokens t
+    JOIN users u ON u.id = t.user_id AND u.deleted_at IS NULL
+    WHERE t.hash = $1
+),
+revoked AS (
+    UPDATE auth_tokens a
+    SET revoked_at = now(), revoked_reason = $2
+    WHERE a.user_id = (SELECT user_id FROM token) AND a.revoked_at IS NULL
+    RETURNING a.family_uuid
+)
+SELECT ARRAY(SELECT DISTINCT family_uuid FROM revoked)::uuid[] AS families FROM token
+`
+
+type RevokeAllByHashParams struct {
+	Hash   string  `db:"hash" json:"hash"`
+	Reason *string `db:"reason" json:"reason"`
+}
+
+// Revokes every session of the token's owner. No row means the token does not exist or its user
+// was deleted.
+func (q *Queries) RevokeAllByHash(ctx context.Context, arg RevokeAllByHashParams) ([]uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, revokeAllByHash, arg.Hash, arg.Reason)
+	var families []uuid.UUID
+	err := row.Scan(&families)
+	return families, err
 }
 
 const revokeAllForUser = `-- name: RevokeAllForUser :many
@@ -370,4 +407,31 @@ func (q *Queries) RevokeFamily(ctx context.Context, arg RevokeFamilyParams) (int
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const revokeFamilyByHash = `-- name: RevokeFamilyByHash :one
+WITH token AS (
+    SELECT t.family_uuid FROM auth_tokens t
+    JOIN users u ON u.id = t.user_id AND u.deleted_at IS NULL
+    WHERE t.hash = $1
+),
+revoked AS (
+    UPDATE auth_tokens a
+    SET revoked_at = now(), revoked_reason = $2
+    WHERE a.family_uuid = (SELECT family_uuid FROM token) AND a.revoked_at IS NULL
+)
+SELECT family_uuid FROM token
+`
+
+type RevokeFamilyByHashParams struct {
+	Hash   string  `db:"hash" json:"hash"`
+	Reason *string `db:"reason" json:"reason"`
+}
+
+// No row means the token does not exist or its user was deleted.
+func (q *Queries) RevokeFamilyByHash(ctx context.Context, arg RevokeFamilyByHashParams) (uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, revokeFamilyByHash, arg.Hash, arg.Reason)
+	var family_uuid uuid.UUID
+	err := row.Scan(&family_uuid)
+	return family_uuid, err
 }

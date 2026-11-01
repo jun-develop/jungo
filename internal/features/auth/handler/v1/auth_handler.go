@@ -10,6 +10,7 @@ import (
 	"github.com/jun-develop/junkit/security"
 	"github.com/jun-develop/junkit/validation"
 
+	"jungo/internal/common/actor"
 	"jungo/internal/features/auth/domain"
 	v1dto "jungo/internal/features/auth/dto/v1"
 )
@@ -32,8 +33,7 @@ func NewAuthHandler(service domain.AuthService, responder response.Responder, va
 // Login handles POST /auth/login.
 func (h *AuthHandler) Login(ctx *gin.Context) {
 	var req v1dto.LoginRequest
-	if err := ctx.ShouldBindJSON(&req); err != nil {
-		h.responder.SendWithData(ctx, http.StatusUnprocessableEntity, "validation_error", h.validator.GetValidationErrors(ctx, err))
+	if !validation.BindJSON(ctx, h.responder, h.validator, &req) {
 		return
 	}
 
@@ -49,8 +49,7 @@ func (h *AuthHandler) Login(ctx *gin.Context) {
 // Refresh handles POST /auth/refresh. The refresh token is read from the body only.
 func (h *AuthHandler) Refresh(ctx *gin.Context) {
 	var req v1dto.RefreshRequest
-	if err := ctx.ShouldBindJSON(&req); err != nil {
-		h.responder.SendWithData(ctx, http.StatusUnprocessableEntity, "validation_error", h.validator.GetValidationErrors(ctx, err))
+	if !validation.BindJSON(ctx, h.responder, h.validator, &req) {
 		return
 	}
 
@@ -91,7 +90,13 @@ func (h *AuthHandler) LogoutAll(ctx *gin.Context) {
 func (h *AuthHandler) Me(ctx *gin.Context) {
 	identity := security.MustGetIdentity[*domain.Identity](ctx)
 
-	h.responder.SendWithData(ctx, http.StatusOK, "profile_retrieved", v1dto.NewSessionResponse(identity.Session, time.Now()))
+	// Guard.Authenticated stored the actor with the user's permissions.
+	var permissions []string
+	if a, ok := actor.From(ctx.Request.Context()); ok {
+		permissions = a.Permissions
+	}
+
+	h.responder.SendWithData(ctx, http.StatusOK, "profile_retrieved", v1dto.NewMeResponse(identity.Session, permissions, time.Now()))
 }
 
 // Sessions handles GET /auth/sessions.
@@ -110,8 +115,7 @@ func (h *AuthHandler) Sessions(ctx *gin.Context) {
 // TokenDetails handles POST /internal/auth/token-details.
 func (h *AuthHandler) TokenDetails(ctx *gin.Context) {
 	var req v1dto.TokenRequest
-	if err := ctx.ShouldBindJSON(&req); err != nil {
-		h.responder.SendWithData(ctx, http.StatusUnprocessableEntity, "validation_error", h.validator.GetValidationErrors(ctx, err))
+	if !validation.BindJSON(ctx, h.responder, h.validator, &req) {
 		return
 	}
 
@@ -127,8 +131,7 @@ func (h *AuthHandler) TokenDetails(ctx *gin.Context) {
 // Revoke handles POST /internal/auth/revoke.
 func (h *AuthHandler) Revoke(ctx *gin.Context) {
 	var req v1dto.TokenRequest
-	if err := ctx.ShouldBindJSON(&req); err != nil {
-		h.responder.SendWithData(ctx, http.StatusUnprocessableEntity, "validation_error", h.validator.GetValidationErrors(ctx, err))
+	if !validation.BindJSON(ctx, h.responder, h.validator, &req) {
 		return
 	}
 
@@ -143,8 +146,7 @@ func (h *AuthHandler) Revoke(ctx *gin.Context) {
 // RevokeAll handles POST /internal/auth/revoke-all.
 func (h *AuthHandler) RevokeAll(ctx *gin.Context) {
 	var req v1dto.TokenRequest
-	if err := ctx.ShouldBindJSON(&req); err != nil {
-		h.responder.SendWithData(ctx, http.StatusUnprocessableEntity, "validation_error", h.validator.GetValidationErrors(ctx, err))
+	if !validation.BindJSON(ctx, h.responder, h.validator, &req) {
 		return
 	}
 

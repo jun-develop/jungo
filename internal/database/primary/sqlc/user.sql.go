@@ -67,9 +67,10 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (User, e
 }
 
 const deleteUser = `-- name: DeleteUser :execrows
-UPDATE users SET deleted_at = now() WHERE uuid = $1 AND deleted_at IS NULL
+UPDATE users SET deleted_at = now(), avatar_url = NULL WHERE uuid = $1 AND deleted_at IS NULL
 `
 
+// avatar_url is cleared because DeleteUser removes the file.
 func (q *Queries) DeleteUser(ctx context.Context, argUuid uuid.UUID) (int64, error) {
 	result, err := q.db.Exec(ctx, deleteUser, argUuid)
 	if err != nil {
@@ -126,6 +127,17 @@ func (q *Queries) GetUserByUUID(ctx context.Context, argUuid uuid.UUID) (User, e
 	return i, err
 }
 
+const getUserIDByUUID = `-- name: GetUserIDByUUID :one
+SELECT id FROM users WHERE uuid = $1 AND deleted_at IS NULL
+`
+
+func (q *Queries) GetUserIDByUUID(ctx context.Context, argUuid uuid.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, getUserIDByUUID, argUuid)
+	var id int64
+	err := row.Scan(&id)
+	return id, err
+}
+
 const listUsers = `-- name: ListUsers :many
 SELECT id, uuid, email, password_hash, first_name, last_name, phone_number, avatar_url, status, created_at, updated_at, deleted_at FROM users
 WHERE deleted_at IS NULL
@@ -143,6 +155,7 @@ type ListUsersParams struct {
 	Limit     int32  `db:"limit" json:"limit"`
 }
 
+// No count(*) OVER(): it makes Postgres read and sort every matching row to return one page.
 func (q *Queries) ListUsers(ctx context.Context, arg ListUsersParams) ([]User, error) {
 	rows, err := q.db.Query(ctx, listUsers,
 		arg.Search,
@@ -179,6 +192,18 @@ func (q *Queries) ListUsers(ctx context.Context, arg ListUsersParams) ([]User, e
 		return nil, err
 	}
 	return items, nil
+}
+
+const lockUserByUUID = `-- name: LockUserByUUID :one
+SELECT id FROM users WHERE uuid = $1 AND deleted_at IS NULL FOR UPDATE
+`
+
+// Locks the user's row until the transaction ends, so changes to their roles wait for it.
+func (q *Queries) LockUserByUUID(ctx context.Context, argUuid uuid.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, lockUserByUUID, argUuid)
+	var id int64
+	err := row.Scan(&id)
+	return id, err
 }
 
 const updateUser = `-- name: UpdateUser :one

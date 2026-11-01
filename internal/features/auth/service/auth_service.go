@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -26,9 +27,6 @@ const (
 
 // warnBelowRemaining is the remaining-attempts count at which failed logins get a warning.
 const warnBelowRemaining = 2
-
-// errRefreshReused aborts the refresh transaction when the token was already consumed.
-var errRefreshReused = errors.New("refresh token reused")
 
 // Params defines dependencies for AuthService.
 type Params struct {
@@ -123,7 +121,8 @@ func (s *AuthService) Login(ctx context.Context, input domain.LoginInput) (*doma
 		return nil, domain.ErrUserInactive
 	}
 
-	pair, params, err := s.newTokenPair(creds.UserID, uuid.New(), meta)
+	pair, params, err := s.newTokenPair(meta)
+	params.UserID, params.FamilyUUID = creds.UserID, uuid.New()
 	if err != nil {
 		return nil, err
 	}
@@ -133,7 +132,7 @@ func (s *AuthService) Login(ctx context.Context, input domain.LoginInput) (*doma
 		return nil, err
 	}
 
-	s.cache.InvalidateFamily(ctx, result.StaleFamilyUUID)
+	s.cache.InvalidateFamilies(ctx, result.StaleFamilyUUID)
 
 	s.guard.Succeeded(ctx, meta.IPAddress, email)
 
@@ -142,72 +141,48 @@ func (s *AuthService) Login(ctx context.Context, input domain.LoginInput) (*doma
 
 // Refresh exchanges a refresh token for a new pair in the same session.
 //
-// Flow: open token -> checks -> [tx: consume -> revoke family -> issue pair] -> invalidate cache
+// Flow: open token -> new pair -> [one DB call: lock token -> checks -> retire old pair -> issue new] -> invalidate cache
 func (s *AuthService) Refresh(ctx context.Context, refreshToken string, meta domain.Metadata) (*domain.TokenPair, error) {
 	hash, err := s.openToken(refreshToken)
 	if err != nil {
 		return nil, err
 	}
 
-	token, err := s.repo.GetTokenByHash(ctx, hash)
+	pair, params, err := s.newTokenPair(meta)
 	if err != nil {
-		if errors.Is(err, domain.ErrTokenNotFound) {
-			return nil, domain.ErrInvalidToken
-		}
-
 		return nil, err
 	}
 
-	switch {
-	case token.Type != domain.TokenTypeRefresh:
+	result, err := s.repo.RefreshSession(ctx, hash, params)
+	if err != nil {
+		return nil, err
+	}
+
+	switch result.Status {
+	case domain.RefreshRotated:
+		s.cache.InvalidateFamilies(ctx, result.FamilyUUID)
+		return pair, nil
+	case domain.RefreshReused:
+		s.logger.Warn("auth: refresh token reuse detected, session revoked",
+			zap.String("family_uuid", result.FamilyUUID.String()),
+			zap.String("user_uuid", result.UserUUID.String()),
+		)
+		s.cache.InvalidateFamilies(ctx, result.FamilyUUID)
+
+		return nil, domain.ErrTokenReused
+	case domain.RefreshNotFound:
+		return nil, domain.ErrInvalidToken
+	case domain.RefreshInvalidType:
 		return nil, domain.ErrInvalidTokenType
-	case !token.UserActive:
+	case domain.RefreshUserInactive:
 		return nil, domain.ErrUserInactive
-	case token.RevokedAt != nil && token.RevokedReason != nil && *token.RevokedReason == domain.RevokedReasonRefresh:
-		return nil, s.handleRefreshReuse(ctx, token)
-	case token.RevokedAt != nil:
+	case domain.RefreshRevoked:
 		return nil, domain.ErrTokenRevoked
-	case !s.now().Before(token.ExpiresAt):
+	case domain.RefreshExpired:
 		return nil, domain.ErrTokenExpired
+	default:
+		return nil, fmt.Errorf("auth: unknown refresh status %q", result.Status)
 	}
-
-	// Keep the session's device when the client omits X-Device-ID.
-	if strings.TrimSpace(meta.DeviceID) == "" && token.DeviceID != nil {
-		meta.DeviceID = *token.DeviceID
-	}
-
-	pair, params, err := s.newTokenPair(token.UserID, token.FamilyUUID, meta)
-	if err != nil {
-		return nil, err
-	}
-
-	err = s.repo.WithTransaction(ctx, func(txCtx context.Context) error {
-		consumed, err := s.repo.ConsumeRefreshToken(txCtx, hash)
-		if err != nil {
-			return err
-		}
-
-		if !consumed {
-			return errRefreshReused
-		}
-
-		if err := s.repo.RevokeFamily(txCtx, token.FamilyUUID, domain.RevokedReasonRefresh); err != nil {
-			return err
-		}
-
-		return s.repo.IssueTokenPair(txCtx, params)
-	})
-	if errors.Is(err, errRefreshReused) {
-		return nil, s.handleRefreshReuse(ctx, token)
-	}
-
-	if err != nil {
-		return nil, err
-	}
-
-	s.cache.InvalidateFamily(ctx, token.FamilyUUID)
-
-	return pair, nil
 }
 
 // Logout ends the session the identity's access token belongs to.
@@ -216,7 +191,7 @@ func (s *AuthService) Logout(ctx context.Context, identity *domain.Identity) err
 		return err
 	}
 
-	s.cache.InvalidateFamily(ctx, identity.FamilyUUID)
+	s.cache.InvalidateFamilies(ctx, identity.FamilyUUID)
 
 	return nil
 }
@@ -228,9 +203,7 @@ func (s *AuthService) LogoutAll(ctx context.Context, identity *domain.Identity) 
 		return err
 	}
 
-	for _, family := range families {
-		s.cache.InvalidateFamily(ctx, family)
-	}
+	s.cache.InvalidateFamilies(ctx, families...)
 
 	return nil
 }
@@ -334,16 +307,12 @@ func (s *AuthService) RevokeToken(ctx context.Context, token string) error {
 		return err
 	}
 
-	stored, err := s.repo.GetTokenByHash(ctx, hash)
+	family, err := s.repo.RevokeFamilyByHash(ctx, hash, domain.RevokedReasonAdmin)
 	if err != nil {
 		return err
 	}
 
-	if err := s.repo.RevokeFamily(ctx, stored.FamilyUUID, domain.RevokedReasonAdmin); err != nil {
-		return err
-	}
-
-	s.cache.InvalidateFamily(ctx, stored.FamilyUUID)
+	s.cache.InvalidateFamilies(ctx, family)
 
 	return nil
 }
@@ -355,19 +324,12 @@ func (s *AuthService) RevokeAllTokens(ctx context.Context, token string) error {
 		return err
 	}
 
-	stored, err := s.repo.GetTokenByHash(ctx, hash)
+	families, err := s.repo.RevokeAllByHash(ctx, hash, domain.RevokedReasonAdmin)
 	if err != nil {
 		return err
 	}
 
-	families, err := s.repo.RevokeAllForUser(ctx, stored.UserUUID, domain.RevokedReasonAdmin)
-	if err != nil {
-		return err
-	}
-
-	for _, family := range families {
-		s.cache.InvalidateFamily(ctx, family)
-	}
+	s.cache.InvalidateFamilies(ctx, families...)
 
 	return nil
 }
@@ -394,29 +356,13 @@ func (s *AuthService) getSession(ctx context.Context, hash string) (*domain.Sess
 	})
 }
 
-// handleRefreshReuse revokes the whole family when a used refresh token is presented again.
-func (s *AuthService) handleRefreshReuse(ctx context.Context, token *domain.StoredToken) error {
-	s.logger.Warn("auth: refresh token reuse detected, revoking session",
-		zap.String("family_uuid", token.FamilyUUID.String()),
-		zap.String("user_uuid", token.UserUUID.String()),
-	)
-	if err := s.repo.RevokeFamily(ctx, token.FamilyUUID, domain.RevokedReasonReuse); err != nil {
-		return err
-	}
-
-	s.cache.InvalidateFamily(ctx, token.FamilyUUID)
-
-	return domain.ErrTokenReused
-}
-
-// newTokenPair generates a sealed token pair and the hashed values to persist.
-func (s *AuthService) newTokenPair(userID int64, familyUUID uuid.UUID, meta domain.Metadata) (*domain.TokenPair, domain.NewSessionParams, error) {
+// newTokenPair generates a sealed token pair and the hashed values to persist; the caller sets the
+// params' UserID and FamilyUUID when it needs them.
+func (s *AuthService) newTokenPair(meta domain.Metadata) (*domain.TokenPair, domain.NewSessionParams, error) {
 	now := s.now()
 	accessRaw, refreshRaw := security.GenerateToken(), security.GenerateToken()
 
 	params := domain.NewSessionParams{
-		UserID:           userID,
-		FamilyUUID:       familyUUID,
 		AccessHash:       security.HashToken(accessRaw),
 		AccessExpiresAt:  now.Add(s.cfg.AccessTokenTTL),
 		RefreshHash:      security.HashToken(refreshRaw),

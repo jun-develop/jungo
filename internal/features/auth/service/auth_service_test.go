@@ -86,10 +86,6 @@ func (r *fakeRepository) GetCredentialsByEmail(_ context.Context, email string) 
 	return nil, domain.ErrUserNotFound
 }
 
-func (r *fakeRepository) WithTransaction(ctx context.Context, fn func(ctx context.Context) error) error {
-	return fn(ctx)
-}
-
 func (r *fakeRepository) CreateLoginSession(_ context.Context, p domain.NewSessionParams) (*domain.LoginSessionResult, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -103,7 +99,7 @@ func (r *fakeRepository) CreateLoginSession(_ context.Context, p domain.NewSessi
 		}
 
 		byDevice := p.DeviceID != nil && t.deviceID != nil && *t.deviceID == *p.DeviceID
-		byClient := p.DeviceID == nil && t.deviceID == nil && eqPtr(t.ip, p.IPAddress) && eqPtr(t.ua, p.UserAgent)
+		byClient := p.DeviceID == nil && t.deviceID == nil && sameClient(t.ip, p.IPAddress) && eqPtr(t.ua, p.UserAgent)
 		if byDevice || byClient {
 			existing = t.family
 			break
@@ -134,12 +130,44 @@ func (r *fakeRepository) CreateLoginSession(_ context.Context, p domain.NewSessi
 	return &domain.LoginSessionResult{FamilyUUID: p.FamilyUUID, StaleFamilyUUID: existing}, nil
 }
 
-func (r *fakeRepository) IssueTokenPair(_ context.Context, p domain.NewSessionParams) error {
+// RefreshSession mirrors f_auth_refresh_session.
+func (r *fakeRepository) RefreshSession(_ context.Context, hash string, p domain.NewSessionParams) (*domain.RefreshResult, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.insertPairLocked(p)
 
-	return nil
+	t := r.byHash(hash)
+	if t == nil || r.users[t.userID] == nil || r.users[t.userID].deleted {
+		return &domain.RefreshResult{Status: domain.RefreshNotFound}, nil
+	}
+
+	u := r.users[t.userID]
+	result := &domain.RefreshResult{FamilyUUID: t.family, UserUUID: u.uuid}
+
+	switch {
+	case t.typ != domain.TokenTypeRefresh:
+		result.Status = domain.RefreshInvalidType
+	case !u.active:
+		result.Status = domain.RefreshUserInactive
+	case t.reason != nil && *t.reason == domain.RevokedReasonRefresh:
+		r.revokeFamilyLocked(t.family, domain.RevokedReasonReuse)
+		result.Status = domain.RefreshReused
+	case t.revokedAt != nil:
+		result.Status = domain.RefreshRevoked
+	case !r.now().Before(t.expiresAt):
+		result.Status = domain.RefreshExpired
+	default:
+		r.revokeFamilyLocked(t.family, domain.RevokedReasonRefresh)
+
+		p.UserID, p.FamilyUUID = t.userID, t.family
+		if p.DeviceID == nil {
+			p.DeviceID = t.deviceID
+		}
+
+		r.insertPairLocked(p)
+		result.Status = domain.RefreshRotated
+	}
+
+	return result, nil
 }
 
 func (r *fakeRepository) GetSessionByHash(_ context.Context, hash string) (*domain.Session, error) {
@@ -200,27 +228,40 @@ func (r *fakeRepository) GetTokenByHash(_ context.Context, hash string) (*domain
 	}, nil
 }
 
-func (r *fakeRepository) ConsumeRefreshToken(_ context.Context, hash string) (bool, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	t := r.byHash(hash)
-	if t == nil || t.typ != domain.TokenTypeRefresh || t.revokedAt != nil || !r.now().Before(t.expiresAt) {
-		return false, nil
-	}
-
-	now, reason := r.now(), domain.RevokedReasonRefresh
-	t.revokedAt, t.reason = &now, &reason
-
-	return true, nil
-}
-
 func (r *fakeRepository) RevokeFamily(_ context.Context, family uuid.UUID, reason string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.revokeFamilyLocked(family, reason)
 
 	return nil
+}
+
+func (r *fakeRepository) RevokeFamilyByHash(_ context.Context, hash, reason string) (uuid.UUID, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	t := r.byHash(hash)
+	if t == nil || r.users[t.userID] == nil || r.users[t.userID].deleted {
+		return uuid.Nil, domain.ErrTokenNotFound
+	}
+
+	r.revokeFamilyLocked(t.family, reason)
+
+	return t.family, nil
+}
+
+func (r *fakeRepository) RevokeAllByHash(ctx context.Context, hash, reason string) ([]uuid.UUID, error) {
+	r.mu.Lock()
+	t := r.byHash(hash)
+	if t == nil || r.users[t.userID] == nil || r.users[t.userID].deleted {
+		r.mu.Unlock()
+		return nil, domain.ErrTokenNotFound
+	}
+
+	userUUID := r.users[t.userID].uuid
+	r.mu.Unlock()
+
+	return r.RevokeAllForUser(ctx, userUUID, reason)
 }
 
 func (r *fakeRepository) RevokeAllForUser(_ context.Context, userUUID uuid.UUID, reason string) ([]uuid.UUID, error) {
@@ -351,6 +392,15 @@ func (r *fakeRepository) byHash(hash string) *fakeToken {
 	}
 
 	return nil
+}
+
+// sameClient mirrors f_auth_login_session's IP match: an IPv6 address by its /64.
+func sameClient(a, b *string) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+
+	return security.ClientKey(*a) == security.ClientKey(*b)
 }
 
 func eqPtr(a, b *string) bool {
@@ -582,6 +632,20 @@ func TestLogin_WithoutDeviceMatchesByIPAndUserAgent(t *testing.T) {
 			t.Error("the Firefox session was revoked by the Chrome login")
 		}
 	})
+}
+
+func TestLogin_WithoutDeviceMatchesIPv6BySlash64(t *testing.T) {
+	e := newTestEnv(t)
+	meta := func(ip string) domain.Metadata { return domain.Metadata{IPAddress: ip, UserAgent: "Firefox"} }
+	first := mustAuthenticate(t, e, e.login(t, meta("2001:db8:1:2::1")).AccessToken)
+
+	if id := mustAuthenticate(t, e, e.login(t, meta("2001:db8:1:2::99")).AccessToken); id.FamilyUUID != first.FamilyUUID {
+		t.Error("a new address in the same /64 created a new session, want the same one rotated")
+	}
+
+	if id := mustAuthenticate(t, e, e.login(t, meta("2001:db8:1:3::1")).AccessToken); id.FamilyUUID == first.FamilyUUID {
+		t.Error("an address in another /64 rotated the session, want a new one")
+	}
 }
 
 func TestLogin_DifferentDeviceCreatesNewSession(t *testing.T) {

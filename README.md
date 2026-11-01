@@ -50,7 +50,7 @@ a reference for the `junkit` packages.
 | Tool | Needed for | macOS | Windows |
 |---|---|---|---|
 | **Docker Desktop** (Docker + Docker Compose) | Running the app, Postgres, and every other service — the primary, supported way to run this project | `brew install --cask docker`, or download from [docker.com](https://www.docker.com/products/docker-desktop/) | Download from [docker.com](https://www.docker.com/products/docker-desktop/) (the installer sets up the required WSL2 backend), or `winget install Docker.DockerDesktop` |
-| **[`golang-migrate`](https://github.com/golang-migrate/migrate) CLI** | `make migrate-*` — applying database migrations. It always runs from your host, pointed at the Postgres port the dev/prod stack exposes | `brew install golang-migrate` | `scoop install migrate` (needs [Scoop](https://scoop.sh) — see below) |
+| **[`golang-migrate`](https://github.com/golang-migrate/migrate) CLI** | `make migrate-*` — applying database migrations. It always runs from your host, pointed at the Postgres port the dev stack exposes (the prod stack exposes none) | `brew install golang-migrate` | `scoop install migrate` (needs [Scoop](https://scoop.sh) — see below) |
 | **`psql`** (PostgreSQL client) | `make migrate-up` / `make migrate-functions` / `make db-seed` — applying the SQL functions and demo seeders. Like `migrate`, it runs from your host against the exposed Postgres port | `brew install libpq && brew link --force libpq` (client only, no server) | `scoop install postgresql` (includes `psql`) |
 | **[`sqlc`](https://sqlc.dev)** *(optional)* | `make sqlc` — regenerating `internal/database/primary/sqlc` after you change a query. Not needed just to run the app | `brew install sqlc` | Download the Windows binary from the [sqlc releases page](https://github.com/sqlc-dev/sqlc/releases) |
 | **Go 1.26.5** *(optional)* | Only if you run things outside Docker (`go build`, `go test`, `go run ./cmd/console`, ...) | `brew install go` | [go.dev/dl](https://go.dev/dl/) |
@@ -125,7 +125,7 @@ curl http://localhost:<API_SERVER_PORT>/api/v1/users \
 ```
 
 Every `/api/v1/users` route requires a logged-in user — see [6 Authentication](#6-authentication)
-for the full login / refresh / logout flow.
+for the full login / refresh / logout flow — and most need a permission, see [Permissions](#permissions).
 
 ### Demo accounts
 
@@ -137,8 +137,16 @@ Seeded by `make migrate-up` **only when `API_ENVIRONMENT=development`**. All use
 - `member@jungo.com`
 - `user@jungo.com`
 
-They are plain users for now — the names only anticipate future roles. Re-seed any time with
-`make db-seed` (existing emails are skipped).
+Their roles (seeded by `002_access.sql`):
+
+| Account | Role | Permissions |
+|---|---|---|
+| `admin@jungo.com` | `super_admin` | all |
+| `manager@jungo.com` | `manager` | `users:read`, `users:create`, `users:update`, `roles:read` |
+| `member@jungo.com` | `member` | `users:read` |
+| `user@jungo.com` | — | none: can only read and edit themself |
+
+Re-seed any time with `make db-seed` (existing rows are skipped).
 
 Outside development, create the first user with:
 
@@ -202,17 +210,17 @@ All configuration is environment variables in `.env` (created by `make app-init`
 
 | Variable | Purpose |
 |---|---|
-| `API_ENVIRONMENT` | `development` enables demo seeding and dev-friendly defaults |
+| `API_ENVIRONMENT` | Defaults to `production` when unset; `development` (set in `.env.example`) enables demo seeding and dev-friendly defaults |
 | `API_SERVER_PORT` | Port the API listens on (default `8080`) |
 | `DB_*` | Postgres connection + pool tuning |
 | `SECURITY_MAX_BODY_SIZE` | Default largest request body in bytes (2 MB); a route that needs more (e.g. the 5 MB avatar upload) declares its own limit — see [Larger request bodies](#larger-request-bodies-uploads) |
 | `SECURITY_TRUSTED_PROXIES` | **Set this behind a reverse proxy / load balancer** (comma-separated IPs or CIDRs). Empty = `X-Forwarded-For` is ignored, so every client appears as the proxy's IP and they all share one rate limit and one failed-login blacklist (8 failures would lock everyone out for 24h). An invalid entry fails startup |
 | `AUTH_*` | Login, tokens and brute-force limits — see [Authentication › Configuration](#authentication-configuration) |
 | `TRACER_DEBUG_KEY` / `TRACER_DEBUG_VALUE` | Query-param name/value that, with the `X-Internal-Secret: <AUTH_INTERNAL_SECRET>` header, unlocks the [debug dashboard](#7-live-debug-dashboard) |
-| `CACHE_ENABLED` | `cache` package is a no-op unless this is `true` (and Redis is started with `WITH=cache`) |
+| `CACHE_REDIS_ENABLE` | `false` (default): no cache, sessions and permissions are read from the database on every request; `true`: Redis (start it with `WITH=cache`), shared by every instance |
 | `STORAGE_BASE_DIR` / `STORAGE_BASE_URL` | Where uploaded avatars are stored and served from |
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | Ops alerts for panics/rate-limit breaches; empty = safe no-op |
-| `RECAPTCHA_MOCK` | Verifier always succeeds when true (default outside production) |
+| `RECAPTCHA_MOCK` | Verifier always succeeds when true; honored in development only |
 
 ### Container resource limits
 
@@ -261,10 +269,18 @@ login ──► access + refresh token
 |---|---|---|---|
 | `POST` | `/api/v1/auth/login` | — | Log in, get a token pair |
 | `POST` | `/api/v1/auth/refresh` | refresh token (body) | Exchange the refresh token for a new pair |
-| `GET` | `/api/v1/auth/me` | access token | Current user + session info |
+| `GET` | `/api/v1/auth/me` | access token | Current user + session info + `permissions` (for the UI) |
 | `GET` | `/api/v1/auth/sessions` | access token | Devices where the user is logged in (`current: true` = this one) |
 | `POST` | `/api/v1/auth/logout` | access token | Log out this device |
 | `POST` | `/api/v1/auth/logout-all` | access token | Log out every device |
+| `GET` | `/api/v1/permissions` | access token + `roles:read` | Every permission, grouped for the UI |
+| `GET` | `/api/v1/roles`, `/api/v1/roles/:uuid` | `roles:read` | Roles with permissions and user count |
+| `POST` | `/api/v1/roles` | `roles:create` | Create a role (`code`, `name`, optional `permissions`) |
+| `PATCH` | `/api/v1/roles/:uuid` | `roles:update` | Rename a role (the code never changes) |
+| `PUT` | `/api/v1/roles/:uuid/permissions` | `roles:update` | Replace a role's permissions |
+| `DELETE` | `/api/v1/roles/:uuid` | `roles:delete` | Delete a role; its users lose it |
+| `GET` | `/api/v1/users/:uuid/roles` | `roles:read` | A user's roles |
+| `PUT` | `/api/v1/users/:uuid/roles` | `roles:assign` | Replace a user's roles (`role_uuids`) |
 | `POST` | `/api/internal/auth/token-details` | `X-Internal-Secret` | Inspect any token (service-to-service) |
 | `POST` | `/api/internal/auth/revoke` | `X-Internal-Secret` | End the session a token belongs to |
 | `POST` | `/api/internal/auth/revoke-all` | `X-Internal-Secret` | End every session (all devices) of the token's user |
@@ -446,14 +462,14 @@ curl -X POST http://localhost:<API_SERVER_PORT>/api/internal/auth/revoke-all \
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `AUTH_TOKEN_HMAC_SECRET` | — | Signs tokens. Base64, 32 bytes. Required outside development |
+| `AUTH_TOKEN_HMAC_SECRET` | — | Signs tokens. Base64, at least 32 bytes. Required outside development |
 | `AUTH_TOKEN_ENCRYPTION_KEY` | — | Encrypts tokens. Base64, 32 bytes. Required outside development |
 | `AUTH_INTERNAL_SECRET` | — | `X-Internal-Secret` for `/api/internal/auth/*`; empty disables them |
 | `AUTH_ACCESS_TOKEN_TTL` | `15m` | Access token lifetime |
 | `AUTH_REFRESH_TOKEN_TTL` | `720h` | Refresh token lifetime (how long a user stays logged in without activity) |
-| `AUTH_SESSION_CACHE_TTL` | `3m` | How long a session is cached (Redis only); `0` disables the cache |
+| `AUTH_SESSION_CACHE_TTL` | `3m` | How long a session is cached (Redis, or memory without it); `0` disables the cache |
 | `AUTH_REVOKED_RETENTION` | `168h` | How long expired/revoked tokens are kept before cleanup (needed to detect reused refresh tokens) |
-| `AUTH_PASSWORD_COST` | `12` | bcrypt cost; +1 doubles the hashing time (12 ≈ 180 ms) |
+| `AUTH_PASSWORD_COST` | `10` | bcrypt cost; +1 doubles the hashing time (10 ≈ 45 ms, 12 ≈ 180 ms). 10 on purpose: OWASP's minimum, sized for a 2 vCPU server; do not raise it without the owner's decision (stored hashes keep their cost, so it needs rehash-on-login) |
 | `AUTH_RECAPTCHA_ON_LOGIN` | `false` | Require a reCAPTCHA token on login (`recaptcha_token` in the body) |
 | `AUTH_LOGIN_MAX_ATTEMPTS` / `AUTH_LOGIN_BLOCK_WINDOW` | `5` / `15m` | Failed logins per IP before a short block |
 | `AUTH_LOGIN_BLACKLIST_ATTEMPTS` / `AUTH_LOGIN_BLACKLIST_WINDOW` | `8` / `24h` | Failed logins per IP before a long block (+ Telegram alert if configured) |
@@ -462,11 +478,91 @@ curl -X POST http://localhost:<API_SERVER_PORT>/api/internal/auth/revoke-all \
 ### Operations
 
 - **First user**: seeded in development (see [Demo accounts](#demo-accounts)); elsewhere
-  `make console CMD="user:create" ARGS="-email=... -first-name=... -last-name=..."`.
+  `make console CMD="user:create" ARGS="-email=... -first-name=... -last-name=..."`, then make them
+  `super_admin` with SQL (see [Permissions](#permissions)).
 - **Cleanup**: run `make console CMD="auth:cleanup-tokens"` daily (cron) to delete old tokens.
 - **Leaked key**: replace both `AUTH_TOKEN_*` keys and restart — every user must log in again.
-- **Several app instances**: enable Redis (`CACHE_ENABLED=true`) so logout and login limits are shared.
+- **Several app instances**: without Redis nothing is cached, so a logout, a disabled user or a removed permission applies on every instance at once; only login limits are counted per instance (in memory). Enable Redis (`CACHE_REDIS_ENABLE=true`) to save the database reads and share login limits.
 - **Disabling or deleting a user** logs them out of every device immediately.
+
+### Permissions
+
+Routes are protected by **permissions** (`users:create`), never by role names. A role is a named
+set of permissions stored in the database; a user can hold several roles and gets the union.
+
+- **Permissions live in the database**: the `permissions` table is the source of truth (code + UI
+  group). `internal/database/primary/seeders/002_access.sql` inserts the built-in ones (`users:*`,
+  `roles:*`) and grants them all to `super_admin`. Each feature declares the codes it checks in its
+  own `domain/permission.go` (`Permissions`) and provides them to the `permissions` Fx group from its
+  `module.go`, next to their i18n names — so they come and go with the feature. **The app never
+  writes permissions.** On start it only reads the table and refuses to start if a declared
+  permission is missing.
+  `make migrate-up` runs the seeders only when `API_ENVIRONMENT=development`. On other servers run
+  only `seeders/002_access.sql` with psql — never `make db-seed`, which loads every demo seeder —
+  then delete the demo roles it adds:
+  `DELETE FROM roles WHERE code IN ('manager', 'member') AND NOT is_system;`
+- **Routes**: every route under `/api/v1` must be wrapped by `guard.Can(handler, perm...)`,
+  `guard.Authenticated(handler)` or `guard.Public(handler)` — otherwise the app refuses to start.
+  `Can` panics at startup on a permission no feature declares (a typo).
+- **Acting on users**: `Authenticated` routes acting on one user (`GET/PATCH /users/:uuid`, avatar)
+  let the user act on themself, except changing their own status (403 `cannot_change_own_status`).
+  Acting on someone else needs `users:read` / `users:update` / `users:delete`; without it the answer
+  is 404, so the API does not reveal which users exist. Changing or deleting someone else also needs
+  every permission they hold (403 `cannot_manage_stronger_user`): a manager cannot disable an admin,
+  and only a `super_admin` can act on a `super_admin`. No one deletes themself
+  (403 `cannot_delete_self`), so the last `super_admin` always stays.
+- **Cache**: with Redis a user's permissions are cached for `AUTH_PERMISSION_CACHE_TTL` (60s); role
+  changes made through the API invalidate it at once on every instance. Without Redis they are read
+  from the database on every request. Changes that hand out or take away access (role edits, role
+  assignments, changing or deleting a user) never trust the cache: they read the actor's
+  permissions from the database first.
+- **UI**: `GET /api/v1/permissions` (needs `roles:read`) returns the table's permissions grouped, with names;
+  the `/roles` and `/users/:uuid/roles` endpoints (see [Endpoints](#endpoints)) manage roles.
+- **No escalation through the API**: you can never give or take away access you don't hold
+  yourself. When you create a role, every permission in it must be yours. When you set a role's
+  permissions, every permission you add or remove must be yours (the ones that stay are not
+  checked). When you delete a role, or add or remove a role on a user, every permission of that
+  role must be yours. Otherwise the answer is 403 (`cannot_grant_unheld_permission`).
+  `PUT /users/:uuid/roles` also follows the user rules: no one changes their own roles
+  (403 `cannot_change_own_roles`) or those of a user holding a permission they lack
+  (403 `cannot_manage_stronger_user`).
+- **System roles** (`super_admin`) cannot be renamed, edited, deleted, given or taken through the
+  API; `PUT /users/:uuid/roles` keeps them. Give them with SQL.
+
+Roles are managed through the API (see [Endpoints](#endpoints)); there are no console commands. The
+first `super_admin` on a new server (development seeds `admin@jungo.com`) is given with SQL — review
+it and run it yourself:
+
+```sql
+INSERT INTO user_roles (user_id, role_id)
+SELECT u.id, r.id FROM users u JOIN roles r ON r.code = 'super_admin'
+WHERE u.email = 'ops@example.com' AND u.deleted_at IS NULL
+ON CONFLICT DO NOTHING;
+```
+
+Adding a permission:
+
+1. In the feature that checks it: add the const and a `Permissions` entry in its
+   `domain/permission.go`, and its i18n names (`permission.<resource>.<action>`, and
+   `permission_group.<group>` for a new group) in its `module.go`. `make feature` generates all of
+   this for the CRUD permissions.
+2. Insert the row and grant it to super_admin in a new migration (`make feature` puts the CRUD
+   ones in the feature's table migration, and their `DELETE` in its down migration):
+
+   ```sql
+   INSERT INTO permissions (code, group_code) VALUES ('reports:read', 'reports')
+   ON CONFLICT (code) DO NOTHING;
+   INSERT INTO role_permissions (role_id, permission_code)
+   SELECT id, 'reports:read' FROM roles WHERE code = 'super_admin'
+   ON CONFLICT DO NOTHING;
+   ```
+3. Use it in `guard.Can`. If the row is missing from the database, the app stops at startup and
+   names it. Nothing checks the labels: a permission without an i18n name shows its raw key in
+   `GET /permissions`.
+
+Renaming or removing one: change the const, then fix existing databases with SQL
+(`UPDATE permissions SET code = 'new' WHERE code = 'old'` keeps the grants via `ON UPDATE CASCADE`;
+`DELETE FROM permissions WHERE code = '…'` removes its grants too).
 
 To protect your own routes with this auth, see step 5 of [Adding a new feature](#13-adding-a-new-feature).
 
@@ -560,18 +656,29 @@ jungo/
 │   └── scaffold/        code generator behind `make feature` / `make command`
 ├── internal/
 │   ├── app/             Fx composition root (fx.go, app.go)
-│   ├── common/          shared helpers for the whole project
+│   ├── common/          shared helpers for the whole project (actor: the request's user + permissions)
 │   ├── config/          env-var → Config struct
 │   ├── console/         console command kernel (Command interface, dispatcher, global commands)
+│   ├── middleware/      app access policy: BearerAuth, RequireSecret, permission Guard
 │   ├── router/          global middleware + route collection
 │   ├── database/        one folder per database — primary/: connection, migrations, functions, seeders, sqlc queries + generated code
-│   └── features/        user (sample feature — see 12), auth (see 6)
+│   └── features/        user (sample feature — see 12), auth (see 6), access (roles & permissions — see Permissions in 6)
 └── deploy/              Dockerfile, docker-compose (dev + prod)
 ```
 
 The public [`junkit`](https://github.com/jun-develop/junkit) module (a normal `go.mod`
 dependency, no local checkout needed) holds every infrastructure package listed in
 [16](#16-package-tour).
+
+### Two places for middleware
+
+| Where | What | Rule |
+|---|---|---|
+| `junkit/middleware` | `Security`, `Trace`, `CORS`, `Payload`, `Banner`, `Limiter`, `Recover`, `AccessLog`, `RoutePatterns`, `TracerDebug` | Required protection and plumbing every app needs. Configured once in `internal/router/router.go`; you tune options, not code. |
+| `internal/middleware` | `BearerAuth`, `RequireSecret`, permission `Guard` | App policy — who may call what. Yours to read, change and extend. |
+
+Rule of thumb: a middleware that decides **who may do what** belongs in `internal/middleware`; one
+that protects or instruments **every** request, whatever the app, belongs in junkit.
 
 ---
 
@@ -591,14 +698,19 @@ cmd/api/main.go
 Global middleware order (outermost first — see `internal/router/router.go`):
 
 ```
-TracerDebug → Security → Trace → CORS → Gzip → AccessLog → Recover → Payload → Limiter → RoutePatterns → (your handler)
+TracerDebug → Security → Trace → CORS → Gzip → AccessLog → Recover → Payload → Banner → Limiter → RoutePatterns → (your handler)
 ```
 
 Each has a reason for its position (documented in code): `TracerDebug` must be outermost so it can
 catch panics re-raised by `Recover` when running in debug mode; `AccessLog` sits inside `Gzip` so it
 logs uncompressed bodies, and outside `Recover` because it only logs once `c.Next()` returns — so a
 panic must be recovered below it to still be logged; `Recover` comes before everything else so a
-panic in `Payload`, `Limiter`, `RoutePatterns` or a handler still gets a JSON 500; `RoutePatterns`
+panic in `Payload`, `Limiter`, `RoutePatterns` or a handler still gets a JSON 500; `Banner` (on
+unless `BANNER_ENABLED=false`) sits before `Limiter` so a banned client never uses up rate-limit
+tokens and repeated 429s count as strikes — it bans a client that requests a scanner-only path such
+as `/.env`, sends an attack payload in the URL or a scanner's User-Agent, or collects `BANNER_MAX_STRIKES` 401/403/404/405/429 responses within
+`BANNER_STRIKE_WINDOW`, with Redis when enabled (bans shared by every instance), otherwise in
+memory per instance; `RoutePatterns`
 rejects a malformed `:uuid`, `:id` or `:slug` with 404 before auth or the handler runs — so a param
 named `:id` must always be a positive integer (use another name, e.g. `:key`, for free-form values).
 
@@ -616,10 +728,14 @@ internal/features/user/
 ├── service/          UserService impl — business logic (bcrypt hashing, avatar upload via storage)
 ├── dto/v1/           request/response structs + converters to/from domain.User
 ├── handler/v1/       thin HTTP layer: bind → call service → respond
-├── router/v1/        registers routes on a *gin.RouterGroup, applies middleware.BearerAuth
+├── router/v1/        registers routes on a *gin.RouterGroup, applies middleware.BearerAuth + Guard
 ├── command/          feature-scoped console commands (e.g. user:list)
 └── module.go         fx.Module wiring the above together + registerTranslations
 ```
+
+Some features also have `infrastructure/`: code that talks to a cache or an outside service
+(e.g. `auth`'s `SessionCache`, `access`'s `PermissionCache`). `make feature` doesn't generate it;
+add it yourself when needed.
 
 Routes are collected automatically: any type implementing `router.Routes` (optionally also
 `router.Versioned`) that's provided into the `"routes"` Fx group gets mounted by
@@ -642,24 +758,30 @@ shape exactly):
 
 ```bash
 make feature NAME=product              # or: TABLE=custom_table_name to override the default "products"
-make migrate-up                        # creates the generated table
+make migrate-up                        # creates the table and products:read/create/update/delete,
+                                       # granted to super_admin (the app refuses to start without them)
 go build ./...
 ```
 
+Feature names are lowercase letters and underscores only: they become permission codes, which
+the database checks against `^[a-z_]+:[a-z_]+$`.
+
 This creates:
 
-- a migration (up/down),
+- a migration (up/down) for the table and its permissions,
 - a `internal/database/primary/queries/product.sql` + hand-written `sqlc/product.sql.go` (same shape as `user.sql.go` —
   replace with a real `sqlc generate` once you've refined the schema),
 - the full `domain/repository/service/dto/handler/router/module` layer set for a generic
   `name + status` entity,
+- its CRUD permissions (`domain/permission.go`, provided to the `permissions` Fx group by
+  `module.go` with their i18n names),
 
 then registers `product.Module` into `internal/app/fx.go` automatically. Adjust the generated
 columns/fields to fit your actual domain, same as you'd hand-edit anything else.
 
 `make feature-remove NAME=product` reverses everything *except* the migration files — dropping a
-table is destructive, so that step is left for you to confirm explicitly (`make migrate-down`,
-then delete the files).
+table is destructive, so that step is left for you to confirm explicitly (`make migrate-down`
+drops the table and its permissions, with their role grants; then delete the files).
 
 ### Option B — copy `user` by hand
 
@@ -674,15 +796,23 @@ When the generic template doesn't fit:
 
 ### Protecting your routes
 
-Inject `middleware.Authenticator[*authdomain.Identity]` (provided by the auth module) into your
-router and apply `middleware.BearerAuth`, same as `user_router.go` does:
+Inject `middleware.Authenticator[*authdomain.Identity]` (auth module) and `*middleware.Guard`
+(access module) from `jungo/internal/middleware` into your router, apply `BearerAuth`, and wrap
+every handler with the Guard, same as `user_router.go` does:
 
 ```go
 // router: require a valid access token on every route in this group
 group.Use(middleware.BearerAuth(r.authenticator, r.responder, middleware.BearerAuthOptions{}))
+group.POST("", r.guard.Can(r.handler.CreateProduct, accessdomain.ProductsCreate))
+group.GET("/:uuid", r.guard.Authenticated(r.handler.GetProduct)) // service checks ownership
 
 // handler: who is calling?
 identity := security.MustGetIdentity[*authdomain.Identity](c)
+
+// service: the caller and their permissions (set by the Guard)
+if err := actor.RequireSelfOrPermission(ctx, ownerUUID, accessdomain.ProductsUpdate); err != nil {
+	return nil, err
+}
 ```
 
 ### Larger request bodies (uploads)
@@ -895,7 +1025,9 @@ Real usage from [`internal/features/user/handler/v1/user_handler.go`](internal/f
 
 ```go
 var req v1dto.ListUsersRequest
-if err := ctx.ShouldBindQuery(&req); err != nil { /* ... */ }
+if !validation.BindQuery(ctx, h.responder, h.validator, &req) {
+	return
+}
 req.SetDefaults("created_at", "desc")
 
 users, total, err := h.service.GetUsers(ctx.Request.Context(), req.ToFilter())
@@ -939,15 +1071,17 @@ h.responder.Error(ctx, err)
 
 ### validation
 
-Real usage from `user_handler.go`, turning a bind/validate failure into a field-keyed, localized
-error payload:
+Real usage from `user_handler.go`. junkit's `validation.BindJSON` wraps bind + validate: on failure it
+answers 422 with a field-keyed, localized error payload (`validator.GetValidationErrors`) and returns
+`false`, so the handler only returns:
 
 ```go
-if err := ctx.ShouldBindJSON(&req); err != nil {
-	h.responder.SendWithData(ctx, http.StatusUnprocessableEntity, "validation_error",
-		h.validator.GetValidationErrors(ctx, err))
+var req v1dto.CreateUserRequest
+if !validation.BindJSON(ctx, h.responder, h.validator, &req) { // BindQuery for query strings
 	return
 }
+
+uid, ok := validation.ParseUUID(ctx, h.responder, h.validator) // the ":uuid" path parameter
 ```
 
 ### database
@@ -961,9 +1095,7 @@ Postgres error to a domain error:
 func (r *UserRepository) GetByUUID(ctx context.Context, id uuid.UUID) (*domain.User, error) {
 	row, err := r.db.Queries(ctx).GetUserByUUID(ctx, id)
 	if err != nil {
-		return nil, database.Match(err, map[database.ErrorType]error{
-			database.ErrorNotFound: domain.ErrUserNotFound,
-		})
+		return nil, database.MatchNotFound(err, domain.ErrUserNotFound)
 	}
 	return mapUser(row), nil
 }
@@ -1027,7 +1159,7 @@ func (s *UserService) UploadAvatar(ctx context.Context, id uuid.UUID, file domai
 
 Not called from this skeleton (no feature needs caching yet). This app still registers
 `cache.Module`, which resolves a `cache.Cache[T]` — depend on the interface and let config decide
-the backend (Redis, in-memory, or a no-op when `CACHE_ENABLED=false`):
+the backend (Redis when `CACHE_REDIS_ENABLE=true`, otherwise a no-op that always calls the loader):
 
 ```go
 type UserService struct {
@@ -1055,9 +1187,9 @@ resp, err := client.Get("https://example.com/health")
 ### telegram + notification
 
 Not called from this skeleton's routes directly, but wired into `junkit/middleware`'s `Recover`
-and `Limiter` (registered in
-[`internal/router/router.go`](internal/router/router.go)) to send ops alerts on panics and
-rate-limit breaches:
+`Limiter` and `Banner` (registered in
+[`internal/router/router.go`](internal/router/router.go)) to send ops alerts on panics,
+rate-limit breaches and new bans:
 
 ```go
 middleware.Recover(logger, notifier, responder, middleware.RecoverOptions{ /* ... */ })
@@ -1141,6 +1273,8 @@ r.Router.Use(
 	middleware.Recover(r.HTTPLogger, r.Notifier, r.Responder, middleware.RecoverOptions{Debug: debug}),
 	// RouteLimits: per-route larger limits collected from router.BodyLimited routes.
 	middleware.Payload(middleware.PayloadOptions{MaxBodySize: cfg.Security.MaxRequestBodySize, RouteLimits: bodyLimits}, r.Responder),
+	// Added only when BANNER_ENABLED (the default); Redis when enabled, otherwise memory.
+	middleware.Banner(middleware.BannerOptions{Cache: cache.New[int64](r.CacheOptions.OrMemory()), MaxStrikes: 30, StrikeWindow: time.Minute, BanDurations: banDurations}, r.LimiterLogger, r.Responder, r.Notifier),
 	middleware.Limiter(middleware.LimiterOptions{RequestsPerSecond: 10, Burst: 30}, r.LimiterLogger, r.Responder, r.Notifier),
 	middleware.RoutePatterns(map[string]func(string) bool{"uuid": middleware.IsUUID, "id": middleware.IsID, "slug": middleware.IsSlug}, r.Responder),
 )

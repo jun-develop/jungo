@@ -82,6 +82,12 @@ type SessionRevoker interface {
 	RevokeUserSessions(ctx context.Context, uid uuid.UUID) error
 }
 
+// PermissionReader reads permission codes from the database, never a cache; implemented by the
+// access feature.
+type PermissionReader interface {
+	GetActorAndTargetPermissions(ctx context.Context, actorID, targetID int64) (actor, target []string, err error)
+}
+
 // CreateUserInput holds data for creating a user.
 type CreateUserInput struct {
 	FirstName   string
@@ -111,6 +117,7 @@ type UserListFilter struct {
 
 // UserRepository defines database operations for users.
 type UserRepository interface {
+	WithTransaction(ctx context.Context, fn func(ctx context.Context) error) error
 	Create(ctx context.Context, input CreateUserInput, passwordHash string) (*User, error)
 	GetByUUID(ctx context.Context, uid uuid.UUID) (*User, error)
 	GetByEmail(ctx context.Context, email string) (*User, error)
@@ -118,6 +125,8 @@ type UserRepository interface {
 	List(ctx context.Context, filter UserListFilter) ([]*User, int64, error)
 	Update(ctx context.Context, uid uuid.UUID, input UpdateUserInput) (*User, error)
 	Delete(ctx context.Context, uid uuid.UUID) error
+	GetIDByUUID(ctx context.Context, uid uuid.UUID) (int64, error)
+	LockByUUID(ctx context.Context, uid uuid.UUID) (int64, error)
 }
 
 // UserService defines business logic for users.

@@ -13,6 +13,7 @@ import (
 
 	"github.com/jun-develop/junkit/security"
 
+	"jungo/internal/common/actor"
 	"jungo/internal/features/user/domain"
 )
 
@@ -25,6 +26,11 @@ type fakeUserRepository struct {
 	ListFunc       func(ctx context.Context, filter domain.UserListFilter) ([]*domain.User, int64, error)
 	UpdateFunc     func(ctx context.Context, uid uuid.UUID, input domain.UpdateUserInput) (*domain.User, error)
 	DeleteFunc     func(ctx context.Context, uid uuid.UUID) error
+	LockFunc       func(ctx context.Context, uid uuid.UUID) (int64, error)
+}
+
+func (f *fakeUserRepository) WithTransaction(ctx context.Context, fn func(ctx context.Context) error) error {
+	return fn(ctx)
 }
 
 func (f *fakeUserRepository) Create(ctx context.Context, input domain.CreateUserInput, passwordHash string) (*domain.User, error) {
@@ -54,6 +60,33 @@ func (f *fakeUserRepository) Update(ctx context.Context, uid uuid.UUID, input do
 func (f *fakeUserRepository) Delete(ctx context.Context, uid uuid.UUID) error {
 	return f.DeleteFunc(ctx, uid)
 }
+
+func (f *fakeUserRepository) GetIDByUUID(ctx context.Context, uid uuid.UUID) (int64, error) {
+	return f.LockFunc(ctx, uid)
+}
+
+func (f *fakeUserRepository) LockByUUID(ctx context.Context, uid uuid.UUID) (int64, error) {
+	return f.LockFunc(ctx, uid)
+}
+
+// IDs of the users the tests act as and on.
+const (
+	actorUserID  int64 = 1
+	targetUserID int64 = 2
+)
+
+// lockTarget is a LockFunc resolving any UUID to targetUserID.
+func lockTarget(context.Context, uuid.UUID) (int64, error) { return targetUserID, nil }
+
+// fakePermissions is a domain.PermissionReader over a user ID -> codes map.
+type fakePermissions map[int64][]string
+
+func (f fakePermissions) GetActorAndTargetPermissions(_ context.Context, actorID, targetID int64) (actor, target []string, err error) {
+	return f[actorID], f[targetID], nil
+}
+
+// managerPermissions are what withManager's actor holds, in the context and in the database.
+var managerPermissions = []string{domain.UsersRead, domain.UsersUpdate, domain.UsersDelete}
 
 // fakeStorage is a test double for storage.Service that records UploadFile/DeleteFile calls.
 type fakeStorage struct {
@@ -102,7 +135,15 @@ func newTestUserService(t *testing.T, repo domain.UserRepository, storage *fakeS
 }
 
 // newTestUserServiceWithRevoker is newTestUserService that also returns the revoker for assertions.
+// In the database the actor holds managerPermissions and the target none.
 func newTestUserServiceWithRevoker(t *testing.T, repo domain.UserRepository, storage *fakeStorage) (*UserService, *fakeSessionRevoker) {
+	t.Helper()
+
+	return newTestUserServiceWith(t, repo, storage, fakePermissions{actorUserID: managerPermissions})
+}
+
+// newTestUserServiceWith is newTestUserServiceWithRevoker with the database's permissions.
+func newTestUserServiceWith(t *testing.T, repo domain.UserRepository, storage *fakeStorage, perms fakePermissions) (*UserService, *fakeSessionRevoker) {
 	t.Helper()
 	hasher, err := security.NewPasswordHasher(security.Options{Password: security.PasswordOptions{Cost: bcrypt.MinCost}})
 	if err != nil {
@@ -111,7 +152,7 @@ func newTestUserServiceWithRevoker(t *testing.T, repo domain.UserRepository, sto
 
 	revoker := &fakeSessionRevoker{}
 
-	return NewUserService(repo, storage, hasher, revoker, zap.NewNop()), revoker
+	return NewUserService(repo, perms, storage, hasher, revoker, zap.NewNop()), revoker
 }
 
 func strPtr(s string) *string { return &s }
@@ -211,7 +252,7 @@ func TestUserService_UploadAvatar(t *testing.T) {
 		}
 		svc := newTestUserService(t, repo, storage)
 
-		user, err := svc.UploadAvatar(context.Background(), userID, domain.AvatarFile{Filename: "me.png"})
+		user, err := svc.UploadAvatar(withActor(userID), userID, domain.AvatarFile{Filename: "me.png"})
 		if err != nil {
 			t.Fatalf("UploadAvatar() error = %v, want nil", err)
 		}
@@ -239,7 +280,7 @@ func TestUserService_UploadAvatar(t *testing.T) {
 		}
 		svc := newTestUserService(t, repo, storage)
 
-		if _, err := svc.UploadAvatar(context.Background(), userID, domain.AvatarFile{Filename: "me.png"}); err != nil {
+		if _, err := svc.UploadAvatar(withActor(userID), userID, domain.AvatarFile{Filename: "me.png"}); err != nil {
 			t.Fatalf("UploadAvatar() error = %v, want nil", err)
 		}
 
@@ -263,7 +304,7 @@ func TestUserService_UploadAvatar(t *testing.T) {
 		}
 		svc := newTestUserService(t, repo, storage)
 
-		_, err := svc.UploadAvatar(context.Background(), userID, domain.AvatarFile{Filename: "me.png"})
+		_, err := svc.UploadAvatar(withActor(userID), userID, domain.AvatarFile{Filename: "me.png"})
 		if !errors.Is(err, domain.ErrInvalidAvatarFile) {
 			t.Fatalf("UploadAvatar() error = %v, want %v", err, domain.ErrInvalidAvatarFile)
 		}
@@ -284,7 +325,7 @@ func TestUserService_UploadAvatar(t *testing.T) {
 		}
 		svc := newTestUserService(t, repo, storage)
 
-		_, err := svc.UploadAvatar(context.Background(), userID, domain.AvatarFile{Filename: "me.png"})
+		_, err := svc.UploadAvatar(withActor(userID), userID, domain.AvatarFile{Filename: "me.png"})
 		if !errors.Is(err, wantErr) {
 			t.Fatalf("UploadAvatar() error = %v, want %v", err, wantErr)
 		}
@@ -302,7 +343,7 @@ func TestUserService_UploadAvatar(t *testing.T) {
 		storage := &fakeStorage{}
 		svc := newTestUserService(t, repo, storage)
 
-		_, err := svc.UploadAvatar(context.Background(), userID, domain.AvatarFile{Filename: "me.png"})
+		_, err := svc.UploadAvatar(withActor(userID), userID, domain.AvatarFile{Filename: "me.png"})
 		if !errors.Is(err, wantErr) {
 			t.Fatalf("UploadAvatar() error = %v, want %v", err, wantErr)
 		}
@@ -330,7 +371,7 @@ func TestUserService_DeleteAvatar(t *testing.T) {
 		storage := &fakeStorage{}
 		svc := newTestUserService(t, repo, storage)
 
-		if _, err := svc.DeleteAvatar(context.Background(), userID); err != nil {
+		if _, err := svc.DeleteAvatar(withActor(userID), userID); err != nil {
 			t.Fatalf("DeleteAvatar() error = %v, want nil", err)
 		}
 
@@ -356,7 +397,7 @@ func TestUserService_DeleteAvatar(t *testing.T) {
 		storage := &fakeStorage{}
 		svc := newTestUserService(t, repo, storage)
 
-		_, err := svc.DeleteAvatar(context.Background(), userID)
+		_, err := svc.DeleteAvatar(withActor(userID), userID)
 		if !errors.Is(err, wantErr) {
 			t.Fatalf("DeleteAvatar() error = %v, want %v", err, wantErr)
 		}
@@ -379,7 +420,7 @@ func TestUserService_DeleteAvatar(t *testing.T) {
 		storage := &fakeStorage{}
 		svc := newTestUserService(t, repo, storage)
 
-		if _, err := svc.DeleteAvatar(context.Background(), userID); err != nil {
+		if _, err := svc.DeleteAvatar(withActor(userID), userID); err != nil {
 			t.Fatalf("DeleteAvatar() error = %v, want nil", err)
 		}
 
@@ -397,7 +438,7 @@ func TestUserService_DeleteAvatar(t *testing.T) {
 		storage := &fakeStorage{}
 		svc := newTestUserService(t, repo, storage)
 
-		if _, err := svc.DeleteAvatar(context.Background(), userID); err != nil {
+		if _, err := svc.DeleteAvatar(withActor(userID), userID); err != nil {
 			t.Fatalf("DeleteAvatar() error = %v, want nil", err)
 		}
 
@@ -413,7 +454,7 @@ func TestUserService_DeleteAvatar(t *testing.T) {
 		}
 		svc := newTestUserService(t, repo, &fakeStorage{})
 
-		_, err := svc.DeleteAvatar(context.Background(), userID)
+		_, err := svc.DeleteAvatar(withActor(userID), userID)
 		if !errors.Is(err, wantErr) {
 			t.Fatalf("DeleteAvatar() error = %v, want %v", err, wantErr)
 		}
@@ -434,7 +475,7 @@ func TestUserService_GetUser(t *testing.T) {
 	}
 	svc := newTestUserService(t, repo, &fakeStorage{})
 
-	got, err := svc.GetUser(context.Background(), userID)
+	got, err := svc.GetUser(withActor(userID), userID)
 	if err != nil {
 		t.Fatalf("GetUser() error = %v, want nil", err)
 	}
@@ -513,6 +554,7 @@ func TestUserService_UpdateUser(t *testing.T) {
 	input := domain.UpdateUserInput{FirstName: strPtr("New")}
 	want := &domain.User{UUID: userID, FirstName: "New", Status: domain.UserStatusActive}
 	repo := &fakeUserRepository{
+		LockFunc: lockTarget,
 		UpdateFunc: func(_ context.Context, uid uuid.UUID, in domain.UpdateUserInput) (*domain.User, error) {
 			if uid != userID || in.FirstName == nil || *in.FirstName != "New" {
 				t.Errorf("Update called with (%v, %+v), want (%v, %+v)", uid, in, userID, input)
@@ -523,7 +565,7 @@ func TestUserService_UpdateUser(t *testing.T) {
 	}
 	svc, revoker := newTestUserServiceWithRevoker(t, repo, &fakeStorage{})
 
-	got, err := svc.UpdateUser(context.Background(), userID, input)
+	got, err := svc.UpdateUser(withManager(), userID, input)
 	if err != nil {
 		t.Fatalf("UpdateUser() error = %v, want nil", err)
 	}
@@ -541,13 +583,14 @@ func TestUserService_UpdateUser_DeactivationRevokesSessions(t *testing.T) {
 	userID := uuid.New()
 	inactive := domain.UserStatusInactive
 	repo := &fakeUserRepository{
+		LockFunc: lockTarget,
 		UpdateFunc: func(context.Context, uuid.UUID, domain.UpdateUserInput) (*domain.User, error) {
 			return &domain.User{UUID: userID, Status: domain.UserStatusInactive}, nil
 		},
 	}
 	svc, revoker := newTestUserServiceWithRevoker(t, repo, &fakeStorage{})
 
-	if _, err := svc.UpdateUser(context.Background(), userID, domain.UpdateUserInput{Status: &inactive}); err != nil {
+	if _, err := svc.UpdateUser(withManager(), userID, domain.UpdateUserInput{Status: &inactive}); err != nil {
 		t.Fatalf("UpdateUser() error = %v, want nil", err)
 	}
 
@@ -560,6 +603,7 @@ func TestUserService_UpdateUser_DeactivationPropagatesRevokeError(t *testing.T) 
 	wantErr := errors.New("revoke failed")
 	inactive := domain.UserStatusInactive
 	repo := &fakeUserRepository{
+		LockFunc: lockTarget,
 		UpdateFunc: func(_ context.Context, uid uuid.UUID, _ domain.UpdateUserInput) (*domain.User, error) {
 			return &domain.User{UUID: uid, Status: domain.UserStatusInactive}, nil
 		},
@@ -567,7 +611,7 @@ func TestUserService_UpdateUser_DeactivationPropagatesRevokeError(t *testing.T) 
 	svc, revoker := newTestUserServiceWithRevoker(t, repo, &fakeStorage{})
 	revoker.err = wantErr
 
-	if _, err := svc.UpdateUser(context.Background(), uuid.New(), domain.UpdateUserInput{Status: &inactive}); !errors.Is(err, wantErr) {
+	if _, err := svc.UpdateUser(withManager(), uuid.New(), domain.UpdateUserInput{Status: &inactive}); !errors.Is(err, wantErr) {
 		t.Fatalf("UpdateUser() error = %v, want %v", err, wantErr)
 	}
 }
@@ -577,6 +621,8 @@ func TestUserService_DeleteUser(t *testing.T) {
 		userID := uuid.New()
 		var gotID uuid.UUID
 		repo := &fakeUserRepository{
+			LockFunc:      lockTarget,
+			GetByUUIDFunc: noAvatar,
 			DeleteFunc: func(_ context.Context, uid uuid.UUID) error {
 				gotID = uid
 				return nil
@@ -584,7 +630,7 @@ func TestUserService_DeleteUser(t *testing.T) {
 		}
 		svc, revoker := newTestUserServiceWithRevoker(t, repo, &fakeStorage{})
 
-		if err := svc.DeleteUser(context.Background(), userID); err != nil {
+		if err := svc.DeleteUser(withManager(), userID); err != nil {
 			t.Fatalf("DeleteUser() error = %v, want nil", err)
 		}
 
@@ -600,12 +646,144 @@ func TestUserService_DeleteUser(t *testing.T) {
 	t.Run("propagates a repository error", func(t *testing.T) {
 		wantErr := errors.New("not found")
 		repo := &fakeUserRepository{
-			DeleteFunc: func(context.Context, uuid.UUID) error { return wantErr },
+			LockFunc:      lockTarget,
+			GetByUUIDFunc: noAvatar,
+			DeleteFunc:    func(context.Context, uuid.UUID) error { return wantErr },
 		}
 		svc := newTestUserService(t, repo, &fakeStorage{})
 
-		if err := svc.DeleteUser(context.Background(), uuid.New()); !errors.Is(err, wantErr) {
+		if err := svc.DeleteUser(withManager(), uuid.New()); !errors.Is(err, wantErr) {
 			t.Fatalf("DeleteUser() error = %v, want %v", err, wantErr)
 		}
 	})
+}
+
+func TestUserService_DeleteUser_RemovesAvatarFile(t *testing.T) {
+	repo := &fakeUserRepository{
+		LockFunc: lockTarget,
+		GetByUUIDFunc: func(_ context.Context, uid uuid.UUID) (*domain.User, error) {
+			return &domain.User{UUID: uid, AvatarURL: strPtr("avatar.png")}, nil
+		},
+		DeleteFunc: func(context.Context, uuid.UUID) error { return nil },
+	}
+	storage := &fakeStorage{}
+	svc := newTestUserService(t, repo, storage)
+
+	if err := svc.DeleteUser(withManager(), uuid.New()); err != nil {
+		t.Fatalf("DeleteUser() error = %v, want nil", err)
+	}
+
+	if len(storage.deleteCalls) != 1 || storage.deleteCalls[0] != "avatar.png" {
+		t.Errorf("deleted files = %v, want [avatar.png]", storage.deleteCalls)
+	}
+}
+
+func TestUserService_UploadAvatar_ReauthorizesAfterUpload(t *testing.T) {
+	db := fakePermissions{actorUserID: managerPermissions, targetUserID: {domain.UsersRead}}
+	var wrote bool
+	repo := &fakeUserRepository{
+		LockFunc:      lockTarget,
+		GetByUUIDFunc: noAvatar,
+		UpdateFunc: func(context.Context, uuid.UUID, domain.UpdateUserInput) (*domain.User, error) {
+			wrote = true
+			return &domain.User{}, nil
+		},
+	}
+	storage := &fakeStorage{
+		// The target is promoted while the file uploads.
+		UploadFileFunc: func(context.Context, string) (string, error) {
+			db[targetUserID] = []string{domain.UsersRead, "roles:assign"}
+			return "new.png", nil
+		},
+	}
+	svc, _ := newTestUserServiceWith(t, repo, storage, db)
+
+	_, err := svc.UploadAvatar(withManager(), uuid.New(), domain.AvatarFile{Filename: "a.png"})
+	if !errors.Is(err, domain.ErrCannotManageStrongerUser) {
+		t.Fatalf("UploadAvatar() error = %v, want %v", err, domain.ErrCannotManageStrongerUser)
+	}
+
+	if wrote {
+		t.Error("avatar URL was written for a user who became stronger during the upload")
+	}
+
+	if len(storage.deleteCalls) != 1 || storage.deleteCalls[0] != "new.png" {
+		t.Errorf("deleted files = %v, want the new upload [new.png]", storage.deleteCalls)
+	}
+}
+
+// noAvatar is a GetByUUIDFunc returning a user without an avatar.
+func noAvatar(_ context.Context, uid uuid.UUID) (*domain.User, error) {
+	return &domain.User{UUID: uid}, nil
+}
+
+// withActor returns a context whose actor is the user with uid and no permissions.
+func withActor(uid uuid.UUID) context.Context {
+	return actor.With(context.Background(), &actor.Actor{UserUUID: uid})
+}
+
+// withManager returns a context whose actor (actorUserID) holds managerPermissions.
+func withManager() context.Context {
+	return actor.With(context.Background(), &actor.Actor{UserID: actorUserID, UserUUID: uuid.New(), Permissions: managerPermissions})
+}
+
+func TestUserService_ActingOnUsers(t *testing.T) {
+	self := uuid.New()
+	inactive := domain.UserStatusInactive
+	deactivate := domain.UpdateUserInput{Status: &inactive}
+	asSelf := actor.With(context.Background(), &actor.Actor{UserID: actorUserID, UserUUID: self, Permissions: managerPermissions})
+	noPermission := actor.With(context.Background(), &actor.Actor{UserID: actorUserID, UserUUID: uuid.New()})
+
+	cases := []struct {
+		name   string
+		ctx    context.Context
+		target uuid.UUID
+		db     fakePermissions // actorUserID's and targetUserID's permissions in the database
+		delete bool            // DeleteUser instead of UpdateUser(deactivate)
+		want   error
+	}{
+		{"weaker target", withManager(), uuid.New(), fakePermissions{actorUserID: managerPermissions, targetUserID: {domain.UsersRead}}, false, nil},
+		{"equal target", withManager(), uuid.New(), fakePermissions{actorUserID: managerPermissions, targetUserID: managerPermissions}, true, nil},
+		{"stronger target", withManager(), uuid.New(), fakePermissions{actorUserID: managerPermissions, targetUserID: {domain.UsersRead, "roles:assign"}}, false, domain.ErrCannotManageStrongerUser},
+		{"stronger target, delete", withManager(), uuid.New(), fakePermissions{actorUserID: managerPermissions, targetUserID: {"roles:assign"}}, true, domain.ErrCannotManageStrongerUser},
+		{"permission removed since the request's cache", withManager(), uuid.New(), fakePermissions{actorUserID: {domain.UsersRead}}, false, actor.ErrForbidden},
+		{"no permission hides the user", noPermission, uuid.New(), nil, false, domain.ErrUserNotFound},
+		{"no actor hides the user", context.Background(), uuid.New(), nil, true, domain.ErrUserNotFound},
+		{"own status", asSelf, self, nil, false, domain.ErrCannotChangeOwnStatus},
+		{"own account", asSelf, self, nil, true, domain.ErrCannotDeleteSelf},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var wrote bool
+			repo := &fakeUserRepository{
+				LockFunc:      lockTarget,
+				GetByUUIDFunc: noAvatar,
+				UpdateFunc: func(_ context.Context, uid uuid.UUID, _ domain.UpdateUserInput) (*domain.User, error) {
+					wrote = true
+					return &domain.User{UUID: uid, Status: domain.UserStatusInactive}, nil
+				},
+				DeleteFunc: func(context.Context, uuid.UUID) error {
+					wrote = true
+					return nil
+				},
+			}
+			svc, _ := newTestUserServiceWith(t, repo, &fakeStorage{}, tc.db)
+
+			var err error
+			if tc.delete {
+				err = svc.DeleteUser(tc.ctx, tc.target)
+			} else {
+				_, err = svc.UpdateUser(tc.ctx, tc.target, deactivate)
+			}
+
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("err = %v, want %v", err, tc.want)
+			}
+
+			if wrote != (tc.want == nil) {
+				t.Errorf("wrote = %v, want %v", wrote, tc.want == nil)
+			}
+		})
+	}
 }

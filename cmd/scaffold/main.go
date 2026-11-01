@@ -29,7 +29,8 @@ const (
 	sqlcDir       = "internal/database/primary/sqlc"
 )
 
-var featureNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
+// featureNamePattern also keeps the permission codes ("<plural>:read") within chk_permissions_code_format.
+var featureNamePattern = regexp.MustCompile(`^[a-z][a-z_]*$`)
 
 func main() {
 	kind := flag.String("type", "feature", "\"feature\" or \"command\"")
@@ -57,7 +58,7 @@ func runFeatureScaffold(name, mode, table string) {
 	}
 
 	if !featureNamePattern.MatchString(name) {
-		console.Fatalf("invalid feature name %q: must be snake_case (lowercase letters, digits, underscores; must start with a letter)", name)
+		console.Fatalf("invalid feature name %q: must be snake_case (lowercase letters and underscores; must start with a letter)", name)
 	}
 
 	data := scaffold.NewFeatureData(name, moduleName, table)
@@ -99,7 +100,7 @@ func runCreate(data scaffold.FeatureData, importPath, moduleLine string) {
 	}
 
 	console.Successf("Feature %q generated in %s", data.Name, featureDir)
-	console.Infof("Next: make migrate-up   (creates the %s table)", data.Table)
+	console.Infof("Next: make migrate-up   (creates the %s table and its %s:* permissions, granted to super_admin)", data.Table, data.Plural)
 	console.Infof("Then: make sqlc         (generates internal/database/primary/sqlc/%s.sql.go)", data.Name)
 	console.Infof("Then: go build ./...    (verify everything compiles)")
 }
@@ -132,8 +133,9 @@ func runRemove(data scaffold.FeatureData, importPath, moduleLine string) {
 	}
 
 	console.Warnf("Dropping a table is destructive, so finish the database cleanup by hand:")
-	console.Infof("1. make migrate-down            — rolls back the last migration, dropping the %q table from your database", data.Table)
+	console.Infof("1. make migrate-down            — rolls back the last migration, dropping the %q table and its permissions from your database", data.Table)
 	console.Infof("2. rm %s   — deletes the now-orphaned migration files", strings.Join(migrationFiles, " "))
 	console.Infof("3. make sqlc                     — regenerates internal/database/primary/sqlc so %q is removed from models.go", data.Model)
+
 	console.Successf("Feature %q removed", data.Name)
 }

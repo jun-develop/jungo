@@ -2,19 +2,16 @@ package repository
 
 import (
 	"context"
-	"strings"
 
 	"github.com/google/uuid"
 
 	"github.com/jun-develop/junkit/database"
+	"github.com/jun-develop/junkit/slicex"
 
 	"jungo/internal/database/primary"
 	"jungo/internal/database/primary/sqlc"
 	"jungo/internal/features/user/domain"
 )
-
-// likeEscaper makes a search term match literally inside ILIKE (backslash is the default escape).
-var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
 
 // UserRepository implements domain.UserRepository.
 type UserRepository struct {
@@ -24,6 +21,11 @@ type UserRepository struct {
 // NewUserRepository creates a UserRepository backed by db.
 func NewUserRepository(db *primary.DB) *UserRepository {
 	return &UserRepository{db: db}
+}
+
+// WithTransaction implements domain.UserRepository.
+func (r *UserRepository) WithTransaction(ctx context.Context, fn func(ctx context.Context) error) error {
+	return r.db.WithTransaction(ctx, fn)
 }
 
 // Create implements domain.UserRepository.
@@ -49,9 +51,7 @@ func (r *UserRepository) Create(ctx context.Context, input domain.CreateUserInpu
 func (r *UserRepository) GetByUUID(ctx context.Context, uid uuid.UUID) (*domain.User, error) {
 	row, err := r.db.Queries(ctx).GetUserByUUID(ctx, uid)
 	if err != nil {
-		return nil, database.Match(err, map[database.ErrorType]error{
-			database.ErrorNotFound: domain.ErrUserNotFound,
-		})
+		return nil, database.MatchNotFound(err, domain.ErrUserNotFound)
 	}
 
 	return mapUser(row), nil
@@ -61,9 +61,7 @@ func (r *UserRepository) GetByUUID(ctx context.Context, uid uuid.UUID) (*domain.
 func (r *UserRepository) GetByEmail(ctx context.Context, email string) (*domain.User, error) {
 	row, err := r.db.Queries(ctx).GetUserByEmail(ctx, email)
 	if err != nil {
-		return nil, database.Match(err, map[database.ErrorType]error{
-			database.ErrorNotFound: domain.ErrUserNotFound,
-		})
+		return nil, database.MatchNotFound(err, domain.ErrUserNotFound)
 	}
 
 	return mapUser(row), nil
@@ -73,9 +71,7 @@ func (r *UserRepository) GetByEmail(ctx context.Context, email string) (*domain.
 func (r *UserRepository) GetCredentialsByEmail(ctx context.Context, email string) (*domain.Credentials, error) {
 	row, err := r.db.Queries(ctx).GetUserByEmail(ctx, email)
 	if err != nil {
-		return nil, database.Match(err, map[database.ErrorType]error{
-			database.ErrorNotFound: domain.ErrUserNotFound,
-		})
+		return nil, database.MatchNotFound(err, domain.ErrUserNotFound)
 	}
 
 	return &domain.Credentials{
@@ -89,7 +85,7 @@ func (r *UserRepository) GetCredentialsByEmail(ctx context.Context, email string
 // List implements domain.UserRepository; it also returns the total count for pagination.
 func (r *UserRepository) List(ctx context.Context, filter domain.UserListFilter) ([]*domain.User, int64, error) {
 	queries := r.db.Queries(ctx)
-	search := likeEscaper.Replace(filter.Search)
+	search := database.EscapeLike(filter.Search)
 
 	rows, err := queries.ListUsers(ctx, sqlc.ListUsersParams{
 		Limit:     filter.Limit,
@@ -101,14 +97,16 @@ func (r *UserRepository) List(ctx context.Context, filter domain.UserListFilter)
 		return nil, 0, err
 	}
 
+	users := slicex.Map(rows, mapUser)
+
+	// A short page that is not past the end is the last one, so it already gives the total.
+	if len(rows) < int(filter.Limit) && (len(rows) > 0 || filter.Offset == 0) {
+		return users, int64(filter.Offset) + int64(len(rows)), nil
+	}
+
 	total, err := queries.CountUsers(ctx, search)
 	if err != nil {
 		return nil, 0, err
-	}
-
-	users := make([]*domain.User, len(rows))
-	for i, row := range rows {
-		users[i] = mapUser(row)
 	}
 
 	return users, total, nil
@@ -125,9 +123,7 @@ func (r *UserRepository) Update(ctx context.Context, uid uuid.UUID, input domain
 		Status:      input.Status,
 	})
 	if err != nil {
-		return nil, database.Match(err, map[database.ErrorType]error{
-			database.ErrorNotFound: domain.ErrUserNotFound,
-		})
+		return nil, database.MatchNotFound(err, domain.ErrUserNotFound)
 	}
 
 	return mapUser(row), nil
@@ -145,6 +141,27 @@ func (r *UserRepository) Delete(ctx context.Context, uid uuid.UUID) error {
 	}
 
 	return nil
+}
+
+// GetIDByUUID implements domain.UserRepository.
+func (r *UserRepository) GetIDByUUID(ctx context.Context, uid uuid.UUID) (int64, error) {
+	id, err := r.db.Queries(ctx).GetUserIDByUUID(ctx, uid)
+	if err != nil {
+		return 0, database.MatchNotFound(err, domain.ErrUserNotFound)
+	}
+
+	return id, nil
+}
+
+// LockByUUID implements domain.UserRepository; it returns the user's ID and locks their row until
+// the transaction in ctx ends.
+func (r *UserRepository) LockByUUID(ctx context.Context, uid uuid.UUID) (int64, error) {
+	id, err := r.db.Queries(ctx).LockUserByUUID(ctx, uid)
+	if err != nil {
+		return 0, database.MatchNotFound(err, domain.ErrUserNotFound)
+	}
+
+	return id, nil
 }
 
 // mapUser converts a generated sqlc.User row to the domain model.

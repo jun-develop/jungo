@@ -6,6 +6,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/jun-develop/junkit/pagination"
+	"github.com/jun-develop/junkit/slicex"
 
 	"jungo/internal/features/user/domain"
 )
@@ -103,10 +104,5 @@ func NewUserResponse(u *domain.User) UserResponse {
 
 // NewUserResponseList converts a slice of domain.User to UserResponse list.
 func NewUserResponseList(users []*domain.User) []UserResponse {
-	responses := make([]UserResponse, len(users))
-	for i, u := range users {
-		responses[i] = NewUserResponse(u)
-	}
-
-	return responses
+	return slicex.Map(users, NewUserResponse)
 }

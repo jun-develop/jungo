@@ -7,6 +7,8 @@ bin = "tmp/api"
 include_ext = ["go"]
 exclude_dir = ["tmp", "bin", "storage", "deploy"]
 delay = 1000
+poll = true
+poll_interval = 1000
 
 [log]
 time = true

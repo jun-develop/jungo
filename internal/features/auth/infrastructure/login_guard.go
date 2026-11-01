@@ -44,13 +44,8 @@ type LoginGuard struct {
 
 // NewLoginGuard creates a LoginGuard; it counts in memory when Redis is disabled.
 func NewLoginGuard(p LoginGuardParams) *LoginGuard {
-	opts := p.CacheOptions
-	if opts.Driver != cache.DriverRedis {
-		opts.Driver = cache.DriverMemory
-	}
-
 	return &LoginGuard{
-		counters: cache.New[int64](opts),
+		counters: cache.New[int64](p.CacheOptions.OrMemory()),
 		cfg:      p.Config.Auth,
 		chatID:   p.Config.Telegram.ChatID,
 		env:      p.Config.Environment,
@@ -60,18 +55,27 @@ func NewLoginGuard(p LoginGuardParams) *LoginGuard {
 }
 
 // Attempt implements domain.LoginGuard; it returns ErrIPBlocked or ErrTooManyAttempts when blocked.
-// The email is reserved before the IP, so an attempt refused for its email does not use up the IP's
-// attempts. A refused attempt stays counted; with fixed windows that never extends a block.
+// The email is checked first, so a blocked email does not use up the IP's attempts. A cache error
+// refuses the attempt, so an outage cannot turn throttling off.
 func (g *LoginGuard) Attempt(ctx context.Context, ip, email string) (int64, error) {
 	if n, _ := g.counters.Get(ctx, ipLongKey(ip)); n >= g.cfg.LoginBlacklistAttempts {
 		return 0, domain.ErrIPBlocked
 	}
 
-	if g.incr(ctx, emailKey(email), g.cfg.LoginBlockWindow) > g.cfg.LoginEmailMaxAttempts {
+	perEmail, err := g.incr(ctx, emailKey(email), g.cfg.LoginBlockWindow)
+	if err != nil {
+		return 0, err
+	}
+
+	if perEmail > g.cfg.LoginEmailMaxAttempts {
 		return 0, domain.ErrTooManyAttempts
 	}
 
-	short := g.incr(ctx, ipShortKey(ip), g.cfg.LoginBlockWindow)
+	short, err := g.incr(ctx, ipShortKey(ip), g.cfg.LoginBlockWindow)
+	if err != nil {
+		return 0, err
+	}
+
 	if short > g.cfg.LoginMaxAttempts {
 		return 0, domain.ErrTooManyAttempts
 	}
@@ -81,9 +85,13 @@ func (g *LoginGuard) Attempt(ctx context.Context, ip, email string) (int64, erro
 
 // RecordFailure implements domain.LoginGuard; it counts the failure towards the IP blacklist.
 func (g *LoginGuard) RecordFailure(ctx context.Context, ip string) {
-	long := g.incr(ctx, ipLongKey(ip), g.cfg.LoginBlacklistWindow)
+	long, err := g.incr(ctx, ipLongKey(ip), g.cfg.LoginBlacklistWindow)
+	if err != nil {
+		return
+	}
+
 	if long == g.cfg.LoginBlacklistAttempts {
-		g.logger.Warn("login guard: IP blacklisted after repeated failures", zap.String("ip", ip), zap.Int64("failures", long))
+		g.logger.Warn("login guard: IP blacklisted after repeated failures", zap.String("ip", ip), zap.String("blocked", security.ClientKey(ip)), zap.Int64("failures", long))
 		g.notifyBlacklisted(ctx, ip, long)
 	}
 }
@@ -95,15 +103,15 @@ func (g *LoginGuard) Succeeded(ctx context.Context, ip, email string) {
 	_ = g.counters.Delete(ctx, emailKey(email))
 }
 
-// incr increments a counter; errors count as zero.
-func (g *LoginGuard) incr(ctx context.Context, key string, ttl time.Duration) int64 {
+// incr increments a counter, logging a failure.
+func (g *LoginGuard) incr(ctx context.Context, key string, ttl time.Duration) (int64, error) {
 	n, err := g.counters.Incr(ctx, key, ttl)
 	if err != nil {
 		g.logger.Error("login guard: increment counter failed", zap.String("key", key), zap.Error(err))
-		return 0
+		return 0, fmt.Errorf("increment login counter: %w", err)
 	}
 
-	return n
+	return n, nil
 }
 
 // notifyBlacklisted sends a best-effort Telegram alert when Telegram is configured.
@@ -114,10 +122,10 @@ func (g *LoginGuard) notifyBlacklisted(ctx context.Context, ip string, failures 
 
 	msg := fmt.Sprintf("🛡️ <b>Security Alert: Brute Force Attempt</b>\n"+
 		"<b>Environment:</b> %s\n"+
-		"<b>IP Address:</b> <code>%s</code>\n"+
+		"<b>IP Address:</b> <code>%s</code> (blocked: <code>%s</code>)\n"+
 		"<b>Time:</b> %s\n"+
 		"⛔ <b>Action:</b> IP blocked for <b>%s</b> (%d failed attempts).",
-		g.env, ip, time.Now().Format(time.DateTime), g.cfg.LoginBlacklistWindow, failures)
+		g.env, ip, security.ClientKey(ip), time.Now().Format(time.DateTime), g.cfg.LoginBlacklistWindow, failures)
 
 	go func() {
 		sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), notifyTimeout)
@@ -130,12 +138,12 @@ func (g *LoginGuard) notifyBlacklisted(ctx context.Context, ip string, failures 
 
 // ipShortKey returns the short-window counter key for ip.
 func ipShortKey(ip string) string {
-	return "auth:login:ip:short:" + ip
+	return "auth:login:ip:short:" + security.ClientKey(ip)
 }
 
 // ipLongKey returns the long-window counter key for ip.
 func ipLongKey(ip string) string {
-	return "auth:login:ip:long:" + ip
+	return "auth:login:ip:long:" + security.ClientKey(ip)
 }
 
 // emailKey returns the counter key for email (hashed, so addresses are not stored).

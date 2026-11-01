@@ -78,7 +78,7 @@ type TokenInfo struct {
 	Status    string     `json:"status"`
 }
 
-// SessionResponse represents the JSON response for GET /auth/me.
+// SessionResponse represents a session with its user and tokens (GET /auth/me, token details).
 type SessionResponse struct {
 	User         UserInfo    `json:"user"`
 	Session      SessionInfo `json:"session"`
@@ -107,6 +107,22 @@ func NewSessionResponse(s *domain.Session, now time.Time) SessionResponse {
 		AccessToken:  newTokenInfo(s.Access, now),
 		RefreshToken: newTokenInfo(s.Refresh, now),
 	}
+}
+
+// MeResponse represents the JSON response for GET /auth/me: the session and the permission codes
+// the user holds, for the UI to show what they may do (the server still checks every request).
+type MeResponse struct {
+	SessionResponse
+	Permissions []string `json:"permissions"`
+}
+
+// NewMeResponse converts a session and the user's permissions to MeResponse.
+func NewMeResponse(s *domain.Session, permissions []string, now time.Time) MeResponse {
+	if permissions == nil {
+		permissions = []string{}
+	}
+
+	return MeResponse{SessionResponse: NewSessionResponse(s, now), Permissions: permissions}
 }
 
 // TokenDetailsResponse represents the JSON response for POST /internal/auth/token-details.

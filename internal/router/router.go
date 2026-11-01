@@ -5,16 +5,19 @@ import (
 	"fmt"
 	"net/http"
 	"path"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"go.uber.org/fx"
 	"go.uber.org/zap"
 
+	"github.com/jun-develop/junkit/cache"
 	"github.com/jun-develop/junkit/middleware"
 	"github.com/jun-develop/junkit/notification"
 	"github.com/jun-develop/junkit/response"
 
 	"jungo/internal/config"
+	policy "jungo/internal/middleware"
 )
 
 // Routes defines the interface for registering feature routes.
@@ -52,15 +55,18 @@ type Params struct {
 
 	Router        *gin.Engine
 	Config        *config.Config
+	CacheOptions  cache.Options
 	Routes        []Routes              `group:"routes"`
 	HTTPLogger    *zap.Logger           `name:"http"`
 	LimiterLogger *zap.Logger           `name:"limiter"`
 	Notifier      notification.Notifier `optional:"true"`
 	Responder     response.Responder
+	Guard         *policy.Guard
 }
 
 // RegisterAll sets up global middlewares, system routes, and feature routes. It fails when a
-// BodyLimit names a route that was never registered, so a typo cannot silently keep the default.
+// BodyLimit names a route that was never registered, so a typo cannot silently keep the default,
+// and when a versioned route is not wrapped by Guard, so a new route cannot ship without a policy.
 func RegisterAll(p Params) error {
 	// Filled while routes register below; Payload only reads it per request, after startup.
 	bodyLimits := make(map[string]int64)
@@ -107,6 +113,10 @@ func RegisterAll(p Params) error {
 	registered := make(map[string]bool)
 	for _, r := range p.Router.Routes() {
 		registered[middleware.RouteKey(r.Method, r.Path)] = true
+
+		if inGroup(r.Path, versionGroups) && !p.Guard.Guards(r.HandlerFunc) {
+			return fmt.Errorf("router: %s %s is not wrapped by Guard.Can, Guard.Authenticated or Guard.Public", r.Method, r.Path)
+		}
 	}
 
 	for key := range bodyLimits {
@@ -116,6 +126,17 @@ func RegisterAll(p Params) error {
 	}
 
 	return nil
+}
+
+// inGroup reports whether routePath is under one of groups.
+func inGroup(routePath string, groups map[string]*gin.RouterGroup) bool {
+	for _, g := range groups {
+		if strings.HasPrefix(routePath, g.BasePath()+"/") || routePath == g.BasePath() {
+			return true
+		}
+	}
+
+	return false
 }
 
 // registerGlobalMiddlewares attaches global middlewares to the router.
@@ -145,13 +166,27 @@ func registerGlobalMiddlewares(p Params, bodyLimits map[string]int64) {
 		}),
 		middleware.Gzip(middleware.GzipOptions{Level: gzip.BestSpeed}),
 		middleware.AccessLog(p.HTTPLogger, middleware.AccessLogOptions{
-			SkipIf: debug.Matches,
+			SkipIf:            debug.Matches,
+			BodiesOnErrorOnly: true,
 		}),
 		middleware.Recover(p.HTTPLogger, p.Notifier, p.Responder, middleware.RecoverOptions{Debug: debug}),
 		middleware.Payload(middleware.PayloadOptions{
 			MaxBodySize: cfg.Security.MaxRequestBodySize,
 			RouteLimits: bodyLimits,
 		}, p.Responder),
+	)
+
+	if cfg.Banner.Enabled {
+		p.Router.Use(middleware.Banner(middleware.BannerOptions{
+			Cache:        cache.New[int64](p.CacheOptions.OrMemory()),
+			MaxStrikes:   cfg.Banner.MaxStrikes,
+			StrikeWindow: cfg.Banner.StrikeWindow,
+			BanDurations: cfg.Banner.BanDurations,
+			IPWhitelist:  cfg.Limiter.IPWhitelist,
+		}, p.LimiterLogger, p.Responder, p.Notifier))
+	}
+
+	p.Router.Use(
 		middleware.Limiter(middleware.LimiterOptions{
 			RequestsPerSecond: cfg.Limiter.RequestsPerSecond,
 			Burst:             cfg.Limiter.Burst,

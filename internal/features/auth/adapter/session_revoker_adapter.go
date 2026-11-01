@@ -27,9 +27,7 @@ func (a *SessionRevokerAdapter) RevokeUserSessions(ctx context.Context, uid uuid
 		return err
 	}
 
-	for _, family := range families {
-		a.cache.InvalidateFamily(ctx, family)
-	}
+	a.cache.InvalidateFamilies(ctx, families...)
 
 	return nil
 }

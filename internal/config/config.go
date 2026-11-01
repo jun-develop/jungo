@@ -22,7 +22,7 @@ type DatabaseConfig struct {
 	MaxConnIdleTime    time.Duration `env:"DB_MAX_CONN_IDLE_TIME" envDefault:"10m"`
 	HealthCheckPeriod  time.Duration `env:"DB_HEALTH_CHECK_PERIOD" envDefault:"1m"`
 	SlowQueryThreshold time.Duration `env:"DB_SLOW_QUERY_THRESHOLD" envDefault:"200ms"`
-	QueryLogging       bool          `env:"DB_QUERY_LOGGING" envDefault:"true"`
+	QueryLogging       bool          `env:"DB_QUERY_LOGGING" envDefault:"false"`
 }
 
 // CORSConfig configures cross-origin request handling.
@@ -30,7 +30,7 @@ type CORSConfig struct {
 	AllowOrigins     []string `env:"CORS_ALLOW_ORIGINS" envDefault:"*"`
 	AllowMethods     []string `env:"CORS_ALLOW_METHODS" envDefault:"GET,POST,PUT,PATCH,DELETE,OPTIONS"`
 	AllowHeaders     []string `env:"CORS_ALLOW_HEADERS" envDefault:"Content-Type,Authorization,X-Device-ID"`
-	AllowCredentials bool     `env:"CORS_ALLOW_CREDENTIALS" envDefault:"true"`
+	AllowCredentials bool     `env:"CORS_ALLOW_CREDENTIALS" envDefault:"false"`
 	MaxAge           int      `env:"CORS_MAX_AGE" envDefault:"86400"`
 }
 
@@ -65,7 +65,15 @@ type LimiterConfig struct {
 	CleanupInterval   time.Duration `env:"LIMITER_CLEANUP_INTERVAL" envDefault:"1m"`
 	ClientTTL         time.Duration `env:"LIMITER_CLIENT_TTL" envDefault:"3m"`
 	LogTTL            time.Duration `env:"LIMITER_LOG_TTL" envDefault:"30s"`
-	IPWhitelist       []string      `env:"LIMITER_IP_WHITELIST" envDefault:"127.0.0.1,::1"`
+	IPWhitelist       []string      `env:"LIMITER_IP_WHITELIST"`
+}
+
+// BannerConfig configures banning clients that probe the API; LIMITER_IP_WHITELIST is never banned.
+type BannerConfig struct {
+	Enabled      bool            `env:"BANNER_ENABLED" envDefault:"true"`
+	MaxStrikes   int64           `env:"BANNER_MAX_STRIKES" envDefault:"30"`
+	StrikeWindow time.Duration   `env:"BANNER_STRIKE_WINDOW" envDefault:"1m"`
+	BanDurations []time.Duration `env:"BANNER_BAN_DURATIONS" envDefault:"15m,1h,24h"`
 }
 
 // SecurityConfig configures request security limits and trusted proxies.
@@ -76,7 +84,7 @@ type SecurityConfig struct {
 
 // RedisConfig configures the Redis cache connection.
 type RedisConfig struct {
-	Enabled  bool   `env:"CACHE_ENABLED" envDefault:"false"`
+	Enabled  bool   `env:"CACHE_REDIS_ENABLE" envDefault:"false"`
 	Host     string `env:"REDIS_HOST" envDefault:"localhost"`
 	Port     string `env:"REDIS_PORT" envDefault:"6379"`
 	Password string `env:"REDIS_PASSWORD"`
@@ -113,10 +121,16 @@ type AuthConfig struct {
 	RefreshTokenTTL time.Duration `env:"AUTH_REFRESH_TOKEN_TTL" envDefault:"720h"`
 	SessionCacheTTL time.Duration `env:"AUTH_SESSION_CACHE_TTL" envDefault:"3m"`
 
+	PermissionCacheTTL time.Duration `env:"AUTH_PERMISSION_CACHE_TTL" envDefault:"60s"`
+
 	RevokedRetention time.Duration `env:"AUTH_REVOKED_RETENTION" envDefault:"168h"`
 	InternalSecret   string        `env:"AUTH_INTERNAL_SECRET"`
 
-	PasswordCost     int  `env:"AUTH_PASSWORD_COST" envDefault:"12"`
+	// PasswordCost is 10 on purpose: OWASP's minimum, sized for a 2 vCPU server (~60-90 ms per login;
+	// 12 is ~300 ms and caps logins at ~3/s). Do not raise it without the owner's decision: stored
+	// hashes keep their cost, so a change also needs rehash-on-login, or CompareDummy's timing would
+	// reveal which emails are registered.
+	PasswordCost     int  `env:"AUTH_PASSWORD_COST" envDefault:"10"`
 	RecaptchaOnLogin bool `env:"AUTH_RECAPTCHA_ON_LOGIN" envDefault:"false"`
 
 	LoginMaxAttempts       int64         `env:"AUTH_LOGIN_MAX_ATTEMPTS" envDefault:"5"`
@@ -129,7 +143,7 @@ type AuthConfig struct {
 // Config holds all configuration settings for the application.
 type Config struct {
 	ServerPort  string `env:"API_SERVER_PORT" envDefault:"8080"`
-	Environment string `env:"API_ENVIRONMENT" envDefault:"development"`
+	Environment string `env:"API_ENVIRONMENT" envDefault:"production"`
 	Version     string `env:"API_VERSION" envDefault:"v0.1.0"`
 	Commit      string `env:"API_COMMIT" envDefault:"unknown"`
 	Language    string `env:"API_LANGUAGE" envDefault:"en"`
@@ -142,6 +156,7 @@ type Config struct {
 	CORS      CORSConfig
 	Logger    LoggerConfig
 	Limiter   LimiterConfig
+	Banner    BannerConfig
 	Security  SecurityConfig
 	Redis     RedisConfig
 	Storage   StorageConfig

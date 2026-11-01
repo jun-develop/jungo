@@ -18,14 +18,26 @@ func featureFiles(data scaffold.FeatureData, migrationSeq string) []scaffold.Fil
 		{Path: filepath.Join(queriesDir, data.Name+".sql"), Template: queriesTmpl},
 		{Path: filepath.Join(dir, "domain", data.Name+".go"), Template: domainTmpl},
 		{Path: filepath.Join(dir, "domain", "errors.go"), Template: domainErrorsTmpl},
+		{Path: filepath.Join(dir, "domain", "permission.go"), Template: domainPermissionTmpl},
 		{Path: filepath.Join(dir, "repository", data.Name+"_repository.go"), Template: repositoryTmpl},
 		{Path: filepath.Join(dir, "service", data.Name+"_service.go"), Template: serviceTmpl},
 		{Path: filepath.Join(dir, "service", data.Name+"_service_test.go"), Template: serviceTestTmpl},
 		{Path: filepath.Join(dir, "dto", "v1", data.Name+"_dto.go"), Template: dtoTmpl},
 		{Path: filepath.Join(dir, "handler", "v1", data.Name+"_handler.go"), Template: handlerTmpl},
 		{Path: filepath.Join(dir, "router", "v1", data.Name+"_router.go"), Template: routerTmpl},
-		{Path: filepath.Join(dir, "module.go"), Template: moduleTmpl},
+		{Path: filepath.Join(dir, "module.go"), Template: moduleTmplFor(data.Plural)},
 	}
+}
+
+// moduleTmplFor builds the module template with the permission labels' words ("order_items" ->
+// "order items", "Order items") filled in, because text/template cannot replace or capitalize.
+func moduleTmplFor(plural string) string {
+	words := strings.ReplaceAll(plural, "_", " ")
+
+	return strings.NewReplacer(
+		"PLURAL_WORDS", words,
+		"PLURAL_TITLE", strings.ToUpper(words[:1])+words[1:],
+	).Replace(moduleTmpl)
 }
 
 // migrationUpTmpl builds the up-migration template; tableUpper is passed in because
@@ -66,10 +78,33 @@ CREATE TRIGGER trg_{{.Table}}_updated_at
     BEFORE UPDATE ON {{.Table}}
     FOR EACH ROW
     EXECUTE FUNCTION f_set_{{.Table}}_updated_at();
+
+-- =============================================================================
+-- PERMISSIONS
+-- The codes in internal/features/{{.Name}}/domain/permission.go, granted to super_admin.
+-- =============================================================================
+
+INSERT INTO permissions (code, group_code) VALUES
+    ('{{.Plural}}:read',   '{{.Plural}}'),
+    ('{{.Plural}}:create', '{{.Plural}}'),
+    ('{{.Plural}}:update', '{{.Plural}}'),
+    ('{{.Plural}}:delete', '{{.Plural}}')
+ON CONFLICT (code) DO NOTHING;
+
+INSERT INTO role_permissions (role_id, permission_code)
+SELECT r.id, p.code
+FROM roles r
+JOIN permissions p ON p.code IN ('{{.Plural}}:read', '{{.Plural}}:create', '{{.Plural}}:update', '{{.Plural}}:delete')
+WHERE r.code = 'super_admin'
+ON CONFLICT DO NOTHING;
 `
 }
 
-const migrationDownTmpl = `DROP TRIGGER IF EXISTS trg_{{.Table}}_updated_at ON {{.Table}};
+// migrationDownTmpl deletes the feature's permissions (their role grants go with them, ON DELETE
+// CASCADE), then its table.
+const migrationDownTmpl = `DELETE FROM permissions WHERE code IN ('{{.Plural}}:read', '{{.Plural}}:create', '{{.Plural}}:update', '{{.Plural}}:delete');
+
+DROP TRIGGER IF EXISTS trg_{{.Table}}_updated_at ON {{.Table}};
 DROP FUNCTION IF EXISTS f_set_{{.Table}}_updated_at;
 DROP INDEX IF EXISTS idx_{{.Table}}_deleted_at;
 DROP INDEX IF EXISTS idx_{{.Table}}_created_at;
@@ -85,6 +120,7 @@ RETURNING *;
 SELECT * FROM {{.Table}} WHERE uuid = $1 AND deleted_at IS NULL;
 
 -- name: List{{.Pascal}}s :many
+-- No count(*) OVER(): it makes Postgres read and sort every matching row to return one page.
 SELECT * FROM {{.Table}}
 WHERE deleted_at IS NULL
   AND (sqlc.arg(search)::text = '' OR name ILIKE '%' || sqlc.arg(search) || '%')
@@ -177,6 +213,22 @@ type {{.Pascal}}Service interface {
 }
 `
 
+const domainPermissionTmpl = `package domain
+
+// Permission codes ("resource:action") the {{.Name}} feature checks; each must also be a row in the
+// permissions table.
+const (
+	{{.Pascal}}sRead   = "{{.Plural}}:read"
+	{{.Pascal}}sCreate = "{{.Plural}}:create"
+	{{.Pascal}}sUpdate = "{{.Plural}}:update"
+	{{.Pascal}}sDelete = "{{.Plural}}:delete"
+)
+
+// Permissions lists the {{.Name}} feature's permission codes; the module provides them to the
+// "permissions" Fx group.
+var Permissions = []string{ {{- .Pascal}}sRead, {{.Pascal}}sCreate, {{.Pascal}}sUpdate, {{.Pascal}}sDelete}
+`
+
 const domainErrorsTmpl = `package domain
 
 import "github.com/jun-develop/junkit/response"
@@ -195,6 +247,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/jun-develop/junkit/database"
+	"github.com/jun-develop/junkit/slicex"
 
 	"{{.Module}}/internal/database/primary"
 	"{{.Module}}/internal/database/primary/sqlc"
@@ -228,9 +281,7 @@ func (r *{{.Pascal}}Repository) Create(ctx context.Context, input domain.Create{
 func (r *{{.Pascal}}Repository) GetByUUID(ctx context.Context, uid uuid.UUID) (*domain.{{.Pascal}}, error) {
 	row, err := r.db.Queries(ctx).Get{{.Pascal}}ByUUID(ctx, uid)
 	if err != nil {
-		return nil, database.Match(err, map[database.ErrorType]error{
-			database.ErrorNotFound: domain.Err{{.Pascal}}NotFound,
-		})
+		return nil, database.MatchNotFound(err, domain.Err{{.Pascal}}NotFound)
 	}
 
 	return map{{.Pascal}}(row), nil
@@ -239,25 +290,28 @@ func (r *{{.Pascal}}Repository) GetByUUID(ctx context.Context, uid uuid.UUID) (*
 // List implements domain.{{.Pascal}}Repository; it also returns the total count for pagination.
 func (r *{{.Pascal}}Repository) List(ctx context.Context, filter domain.{{.Pascal}}ListFilter) ([]*domain.{{.Pascal}}, int64, error) {
 	queries := r.db.Queries(ctx)
+	search := database.EscapeLike(filter.Search)
 
 	rows, err := queries.List{{.Pascal}}s(ctx, sqlc.List{{.Pascal}}sParams{
 		Limit:     filter.Limit,
 		Offset:    filter.Offset,
-		Search:    filter.Search,
+		Search:    search,
 		SortOrder: filter.SortOrder,
 	})
 	if err != nil {
 		return nil, 0, err
 	}
 
-	total, err := queries.Count{{.Pascal}}s(ctx, filter.Search)
-	if err != nil {
-		return nil, 0, err
+	items := slicex.Map(rows, map{{.Pascal}})
+
+	// A short page that is not past the end is the last one, so it already gives the total.
+	if len(rows) < int(filter.Limit) && (len(rows) > 0 || filter.Offset == 0) {
+		return items, int64(filter.Offset) + int64(len(rows)), nil
 	}
 
-	items := make([]*domain.{{.Pascal}}, len(rows))
-	for i, row := range rows {
-		items[i] = map{{.Pascal}}(row)
+	total, err := queries.Count{{.Pascal}}s(ctx, search)
+	if err != nil {
+		return nil, 0, err
 	}
 
 	return items, total, nil
@@ -271,9 +325,7 @@ func (r *{{.Pascal}}Repository) Update(ctx context.Context, uid uuid.UUID, input
 		Status: input.Status,
 	})
 	if err != nil {
-		return nil, database.Match(err, map[database.ErrorType]error{
-			database.ErrorNotFound: domain.Err{{.Pascal}}NotFound,
-		})
+		return nil, database.MatchNotFound(err, domain.Err{{.Pascal}}NotFound)
 	}
 
 	return map{{.Pascal}}(row), nil
@@ -620,6 +672,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/jun-develop/junkit/pagination"
+	"github.com/jun-develop/junkit/slicex"
 
 	"{{.Module}}/internal/features/{{.Name}}/domain"
 )
@@ -690,12 +743,7 @@ func New{{.Pascal}}Response(m *domain.{{.Pascal}}) {{.Pascal}}Response {
 
 // New{{.Pascal}}ResponseList converts a slice of domain.{{.Pascal}} to {{.Pascal}}Response list.
 func New{{.Pascal}}ResponseList(items []*domain.{{.Pascal}}) []{{.Pascal}}Response {
-	responses := make([]{{.Pascal}}Response, len(items))
-	for i, m := range items {
-		responses[i] = New{{.Pascal}}Response(m)
-	}
-
-	return responses
+	return slicex.Map(items, New{{.Pascal}}Response)
 }
 `
 
@@ -710,7 +758,6 @@ import (
 	"github.com/jun-develop/junkit/response"
 	"github.com/jun-develop/junkit/validation"
 
-	"{{.Module}}/internal/common/httpx"
 	"{{.Module}}/internal/features/{{.Name}}/domain"
 	v1dto "{{.Module}}/internal/features/{{.Name}}/dto/v1"
 )
@@ -730,8 +777,7 @@ func New{{.Pascal}}Handler(service domain.{{.Pascal}}Service, responder response
 // Create{{.Pascal}} handles POST /{{.Plural}}.
 func (h *{{.Pascal}}Handler) Create{{.Pascal}}(ctx *gin.Context) {
 	var req v1dto.Create{{.Pascal}}Request
-	if err := ctx.ShouldBindJSON(&req); err != nil {
-		h.responder.SendWithData(ctx, http.StatusUnprocessableEntity, "validation_error", h.validator.GetValidationErrors(ctx, err))
+	if !validation.BindJSON(ctx, h.responder, h.validator, &req) {
 		return
 	}
 
@@ -746,7 +792,7 @@ func (h *{{.Pascal}}Handler) Create{{.Pascal}}(ctx *gin.Context) {
 
 // Get{{.Pascal}} handles GET /{{.Plural}}/:uuid.
 func (h *{{.Pascal}}Handler) Get{{.Pascal}}(ctx *gin.Context) {
-	uid, ok := httpx.ParseUUID(ctx, h.responder, h.validator)
+	uid, ok := validation.ParseUUID(ctx, h.responder, h.validator)
 	if !ok {
 		return
 	}
@@ -763,8 +809,7 @@ func (h *{{.Pascal}}Handler) Get{{.Pascal}}(ctx *gin.Context) {
 // List{{.Pascal}}s handles GET /{{.Plural}}.
 func (h *{{.Pascal}}Handler) List{{.Pascal}}s(ctx *gin.Context) {
 	var req v1dto.List{{.Pascal}}sRequest
-	if err := ctx.ShouldBindQuery(&req); err != nil {
-		h.responder.SendWithData(ctx, http.StatusUnprocessableEntity, "validation_error", h.validator.GetValidationErrors(ctx, err))
+	if !validation.BindQuery(ctx, h.responder, h.validator, &req) {
 		return
 	}
 
@@ -782,14 +827,13 @@ func (h *{{.Pascal}}Handler) List{{.Pascal}}s(ctx *gin.Context) {
 
 // Update{{.Pascal}} handles PATCH /{{.Plural}}/:uuid.
 func (h *{{.Pascal}}Handler) Update{{.Pascal}}(ctx *gin.Context) {
-	uid, ok := httpx.ParseUUID(ctx, h.responder, h.validator)
+	uid, ok := validation.ParseUUID(ctx, h.responder, h.validator)
 	if !ok {
 		return
 	}
 
 	var req v1dto.Update{{.Pascal}}Request
-	if err := ctx.ShouldBindJSON(&req); err != nil {
-		h.responder.SendWithData(ctx, http.StatusUnprocessableEntity, "validation_error", h.validator.GetValidationErrors(ctx, err))
+	if !validation.BindJSON(ctx, h.responder, h.validator, &req) {
 		return
 	}
 
@@ -804,7 +848,7 @@ func (h *{{.Pascal}}Handler) Update{{.Pascal}}(ctx *gin.Context) {
 
 // Delete{{.Pascal}} handles DELETE /{{.Plural}}/:uuid.
 func (h *{{.Pascal}}Handler) Delete{{.Pascal}}(ctx *gin.Context) {
-	uid, ok := httpx.ParseUUID(ctx, h.responder, h.validator)
+	uid, ok := validation.ParseUUID(ctx, h.responder, h.validator)
 	if !ok {
 		return
 	}
@@ -823,23 +867,25 @@ const routerTmpl = `package v1
 import (
 	"github.com/gin-gonic/gin"
 
-	"github.com/jun-develop/junkit/middleware"
 	"github.com/jun-develop/junkit/response"
 
 	authdomain "{{.Module}}/internal/features/auth/domain"
+	"{{.Module}}/internal/features/{{.Name}}/domain"
 	v1handler "{{.Module}}/internal/features/{{.Name}}/handler/v1"
+	"{{.Module}}/internal/middleware"
 )
 
 // {{.Pascal}}Routes registers the {{.Name}} feature's endpoints under a version group.
 type {{.Pascal}}Routes struct {
 	handler       *v1handler.{{.Pascal}}Handler
 	authenticator middleware.Authenticator[*authdomain.Identity]
+	guard         *middleware.Guard
 	responder     response.Responder
 }
 
 // New{{.Pascal}}Routes creates a {{.Pascal}}Routes.
-func New{{.Pascal}}Routes(handler *v1handler.{{.Pascal}}Handler, authenticator middleware.Authenticator[*authdomain.Identity], responder response.Responder) *{{.Pascal}}Routes {
-	return &{{.Pascal}}Routes{handler: handler, authenticator: authenticator, responder: responder}
+func New{{.Pascal}}Routes(handler *v1handler.{{.Pascal}}Handler, authenticator middleware.Authenticator[*authdomain.Identity], guard *middleware.Guard, responder response.Responder) *{{.Pascal}}Routes {
+	return &{{.Pascal}}Routes{handler: handler, authenticator: authenticator, guard: guard, responder: responder}
 }
 
 // Version implements router.Versioned; routes are nested under "/api/v1".
@@ -847,16 +893,16 @@ func (r *{{.Pascal}}Routes) Version() string {
 	return "v1"
 }
 
-// Register implements router.Routes; every route requires a logged-in user.
+// Register implements router.Routes; every route requires a logged-in user holding its permission.
 func (r *{{.Pascal}}Routes) Register(group *gin.RouterGroup) {
 	items := group.Group("/{{.Plural}}")
 	items.Use(middleware.BearerAuth(r.authenticator, r.responder, middleware.BearerAuthOptions{}))
 
-	items.POST("", r.handler.Create{{.Pascal}})
-	items.GET("", r.handler.List{{.Pascal}}s)
-	items.GET("/:uuid", r.handler.Get{{.Pascal}})
-	items.PATCH("/:uuid", r.handler.Update{{.Pascal}})
-	items.DELETE("/:uuid", r.handler.Delete{{.Pascal}})
+	items.POST("", r.guard.Can(r.handler.Create{{.Pascal}}, domain.{{.Pascal}}sCreate))
+	items.GET("", r.guard.Can(r.handler.List{{.Pascal}}s, domain.{{.Pascal}}sRead))
+	items.GET("/:uuid", r.guard.Can(r.handler.Get{{.Pascal}}, domain.{{.Pascal}}sRead))
+	items.PATCH("/:uuid", r.guard.Can(r.handler.Update{{.Pascal}}, domain.{{.Pascal}}sUpdate))
+	items.DELETE("/:uuid", r.guard.Can(r.handler.Delete{{.Pascal}}, domain.{{.Pascal}}sDelete))
 }
 `
 
@@ -893,6 +939,12 @@ var Module = fx.Module("{{.Name}}",
 			fx.As(new(domain.{{.Pascal}}Service)),
 		),
 	),
+	fx.Provide(
+		fx.Annotate(
+			func() []string { return domain.Permissions },
+			fx.ResultTags({{"` + "`" + `"}}group:"permissions,flatten"{{"` + "`" + `"}}),
+		),
+	),
 	fx.Provide(v1handler.New{{.Pascal}}Handler),
 	fx.Provide(
 		fx.Annotate(
@@ -909,10 +961,16 @@ var Module = fx.Module("{{.Name}}",
 	fx.Invoke(registerTranslations),
 )
 
-// registerTranslations registers domain-specific translation messages.
+// registerTranslations registers this feature's messages and the display names of its permissions.
 func registerTranslations(translator *i18n.Translator) {
 	translator.AddTranslations(map[string]map[string]string{
 		i18n.LangEN: {
+			"permission_group.{{.Plural}}":  "PLURAL_TITLE",
+			"permission.{{.Plural}}.read":   "View PLURAL_WORDS",
+			"permission.{{.Plural}}.create": "Create PLURAL_WORDS",
+			"permission.{{.Plural}}.update": "Update PLURAL_WORDS",
+			"permission.{{.Plural}}.delete": "Delete PLURAL_WORDS",
+
 			"{{.Name}}_not_found": "{{.Pascal}} not found",
 			"{{.Name}}_created":   "{{.Pascal}} created successfully",
 			"{{.Name}}_retrieved": "{{.Pascal}} retrieved successfully",

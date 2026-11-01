@@ -27,6 +27,7 @@ import (
 	"jungo/internal/console"
 	"jungo/internal/console/commands"
 	"jungo/internal/database/primary"
+	"jungo/internal/features/access"
 	"jungo/internal/features/auth"
 	"jungo/internal/features/user"
 	"jungo/internal/router"
@@ -94,6 +95,7 @@ func CoreModules(cfg *config.Config) []fx.Option {
 		// =====================================================================
 		// FEATURES
 		// =====================================================================
+		access.Module,
 		auth.Module,
 		user.Module,
 
@@ -251,7 +253,8 @@ func provideSecurityOptions(cfg *config.Config, log *zap.Logger) (security.Optio
 	return opts, nil
 }
 
-// provideCacheOptions selects the Redis driver when enabled, otherwise a no-op cache.
+// provideCacheOptions uses Redis when enabled, otherwise no cache, because an in-memory cache
+// would let other instances keep serving revoked sessions and permissions.
 func provideCacheOptions(cfg *config.Config) cache.Options {
 	if !cfg.Redis.Enabled {
 		return cache.Options{Driver: cache.DriverNoop}
@@ -282,17 +285,17 @@ func provideNotificationOptions(cfg *config.Config) notification.Options {
 	return notification.Options{TelegramChatID: cfg.Telegram.ChatID, Environment: cfg.Environment}
 }
 
-// provideRecaptchaOptions builds recaptcha.Options from cfg.Recaptcha; the mock is never used
-// in production.
+// provideRecaptchaOptions builds recaptcha.Options from cfg.Recaptcha; the mock is used only in
+// development.
 func provideRecaptchaOptions(cfg *config.Config) (recaptcha.Options, error) {
-	production := cfg.Environment == "production"
-	if production && cfg.Auth.RecaptchaOnLogin && cfg.Recaptcha.SecretKey == "" {
-		return recaptcha.Options{}, errors.New("RECAPTCHA_SECRET_KEY: required in production when AUTH_RECAPTCHA_ON_LOGIN=true")
+	dev := cfg.IsDevelopment()
+	if !dev && cfg.Auth.RecaptchaOnLogin && cfg.Recaptcha.SecretKey == "" {
+		return recaptcha.Options{}, errors.New("RECAPTCHA_SECRET_KEY: required outside development when AUTH_RECAPTCHA_ON_LOGIN=true")
 	}
 
 	return recaptcha.Options{
 		SecretKey: cfg.Recaptcha.SecretKey,
 		MinScore:  cfg.Recaptcha.MinScore,
-		Mock:      cfg.Recaptcha.Mock && !production,
+		Mock:      cfg.Recaptcha.Mock && dev,
 	}, nil
 }

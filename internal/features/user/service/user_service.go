@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"slices"
 
 	"github.com/google/uuid"
 	"go.uber.org/zap"
@@ -11,21 +12,23 @@ import (
 	"github.com/jun-develop/junkit/storage"
 	"github.com/jun-develop/junkit/tracer"
 
+	"jungo/internal/common/actor"
 	"jungo/internal/features/user/domain"
 )
 
 // UserService implements domain.UserService.
 type UserService struct {
-	repo     domain.UserRepository
-	storage  storage.Service
-	hasher   security.PasswordHasher
-	sessions domain.SessionRevoker
-	logger   *zap.Logger
+	repo        domain.UserRepository
+	permissions domain.PermissionReader
+	storage     storage.Service
+	hasher      security.PasswordHasher
+	sessions    domain.SessionRevoker
+	logger      *zap.Logger
 }
 
 // NewUserService creates a UserService.
-func NewUserService(repo domain.UserRepository, storageService storage.Service, hasher security.PasswordHasher, sessions domain.SessionRevoker, logger *zap.Logger) *UserService {
-	return &UserService{repo: repo, storage: storageService, hasher: hasher, sessions: sessions, logger: logger}
+func NewUserService(repo domain.UserRepository, permissions domain.PermissionReader, storageService storage.Service, hasher security.PasswordHasher, sessions domain.SessionRevoker, logger *zap.Logger) *UserService {
+	return &UserService{repo: repo, permissions: permissions, storage: storageService, hasher: hasher, sessions: sessions, logger: logger}
 }
 
 // CreateUser creates a new user with hashed password.
@@ -48,8 +51,13 @@ func (s *UserService) CreateUser(ctx context.Context, input domain.CreateUserInp
 	return s.repo.Create(ctx, input, passwordHash)
 }
 
-// GetUser returns a user by UUID.
+// GetUser returns a user by UUID to the user themself or a holder of users:read; anyone else
+// gets ErrUserNotFound, so the endpoint does not reveal which users exist.
 func (s *UserService) GetUser(ctx context.Context, uid uuid.UUID) (*domain.User, error) {
+	if err := actor.RequireSelfOrPermission(ctx, uid, domain.UsersRead); err != nil {
+		return nil, domain.ErrUserNotFound
+	}
+
 	return s.repo.GetByUUID(ctx, uid)
 }
 
@@ -63,11 +71,26 @@ func (s *UserService) GetUsers(ctx context.Context, filter domain.UserListFilter
 	return s.repo.List(ctx, filter)
 }
 
-// UpdateUser updates user information.
+// UpdateUser updates a user. The user themself may change everything but their status; anyone
+// else is checked by authorize with users:update.
 //
-// Flow: update in DB -> revoke sessions if no longer active
+// Flow: authorize + update (tx) -> revoke sessions if no longer active
 func (s *UserService) UpdateUser(ctx context.Context, uid uuid.UUID, input domain.UpdateUserInput) (*domain.User, error) {
-	user, err := s.repo.Update(ctx, uid, input)
+	var user *domain.User
+	err := s.repo.WithTransaction(ctx, func(ctx context.Context) error {
+		self, err := s.authorize(ctx, uid, domain.UsersUpdate)
+		if err != nil {
+			return err
+		}
+
+		if self && input.Status != nil {
+			return domain.ErrCannotChangeOwnStatus
+		}
+
+		user, err = s.repo.Update(ctx, uid, input)
+
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -81,21 +104,53 @@ func (s *UserService) UpdateUser(ctx context.Context, uid uuid.UUID, input domai
 	return user, nil
 }
 
-// DeleteUser deletes a user by UUID.
+// DeleteUser deletes another user, checked by authorize with users:delete, and removes their
+// avatar file. No one deletes themself, so the last super_admin always stays.
 //
-// Flow: soft-delete in DB -> revoke sessions
+// Flow: authorize + get user + soft-delete (tx) -> revoke sessions -> delete avatar file
 func (s *UserService) DeleteUser(ctx context.Context, uid uuid.UUID) error {
-	if err := s.repo.Delete(ctx, uid); err != nil {
+	var user *domain.User
+	err := s.repo.WithTransaction(ctx, func(ctx context.Context) error {
+		self, err := s.authorize(ctx, uid, domain.UsersDelete)
+		if err != nil {
+			return err
+		}
+
+		if self {
+			return domain.ErrCannotDeleteSelf
+		}
+
+		if user, err = s.repo.GetByUUID(ctx, uid); err != nil {
+			return err
+		}
+
+		return s.repo.Delete(ctx, uid)
+	})
+	if err != nil {
 		return err
 	}
 
-	return s.revokeSessions(ctx, uid)
+	if err := s.revokeSessions(ctx, uid); err != nil {
+		return err
+	}
+
+	if hasAvatar(user) {
+		s.deleteFile(ctx, *user.AvatarURL)
+	}
+
+	return nil
 }
 
-// UploadAvatar uploads a new avatar and updates the user record.
+// UploadAvatar uploads a new avatar and updates the user record, for the user themself or anyone
+// authorize allows with users:update. The upload runs outside the transaction so the row is not
+// kept locked during it; authorize runs again inside, in case the user's roles changed meanwhile.
 //
-// Flow: get user -> upload file -> update avatar URL -> delete old file
+// Flow: authorize -> get user -> upload file -> authorize + update avatar URL (tx) -> delete old file
 func (s *UserService) UploadAvatar(ctx context.Context, uid uuid.UUID, file domain.AvatarFile) (*domain.User, error) {
+	if _, err := s.authorize(ctx, uid, domain.UsersUpdate); err != nil {
+		return nil, err
+	}
+
 	user, err := s.repo.GetByUUID(ctx, uid)
 	if err != nil {
 		return nil, err
@@ -108,7 +163,16 @@ func (s *UserService) UploadAvatar(ctx context.Context, uid uuid.UUID, file doma
 		return nil, domain.ErrInvalidAvatarFile
 	}
 
-	updated, err := s.repo.Update(ctx, uid, domain.UpdateUserInput{AvatarURL: &newURL})
+	var updated *domain.User
+	err = s.repo.WithTransaction(ctx, func(ctx context.Context) error {
+		if _, err := s.authorize(ctx, uid, domain.UsersUpdate); err != nil {
+			return err
+		}
+
+		updated, err = s.repo.Update(ctx, uid, domain.UpdateUserInput{AvatarURL: &newURL})
+
+		return err
+	})
 	if err != nil {
 		s.deleteFile(ctx, newURL)
 		return nil, err
@@ -121,11 +185,27 @@ func (s *UserService) UploadAvatar(ctx context.Context, uid uuid.UUID, file doma
 	return updated, nil
 }
 
-// DeleteAvatar clears the avatar URL, then removes the file.
+// DeleteAvatar clears the avatar URL, then removes the file, for the user themself or anyone
+// authorize allows with users:update.
 //
-// Flow: get user -> clear avatar URL in DB -> delete file
+// Flow: authorize + get user + clear avatar URL (tx) -> delete file
 func (s *UserService) DeleteAvatar(ctx context.Context, uid uuid.UUID) (*domain.User, error) {
-	user, err := s.repo.GetByUUID(ctx, uid)
+	var user, updated *domain.User
+	err := s.repo.WithTransaction(ctx, func(ctx context.Context) error {
+		if _, err := s.authorize(ctx, uid, domain.UsersUpdate); err != nil {
+			return err
+		}
+
+		var err error
+		if user, err = s.repo.GetByUUID(ctx, uid); err != nil || !hasAvatar(user) {
+			return err
+		}
+
+		empty := ""
+		updated, err = s.repo.Update(ctx, uid, domain.UpdateUserInput{AvatarURL: &empty})
+
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -134,15 +214,49 @@ func (s *UserService) DeleteAvatar(ctx context.Context, uid uuid.UUID) (*domain.
 		return user, nil
 	}
 
-	empty := ""
-	updated, err := s.repo.Update(ctx, uid, domain.UpdateUserInput{AvatarURL: &empty})
-	if err != nil {
-		return nil, err
-	}
-
 	s.deleteFile(ctx, *user.AvatarURL)
 
 	return updated, nil
+}
+
+// authorize checks the actor may act on user uid and reports whether uid is the actor. Acting on
+// someone else needs permission plus every permission uid holds (never on a stronger user); without
+// permission the answer is ErrUserNotFound, so it does not reveal which users exist.
+func (s *UserService) authorize(ctx context.Context, uid uuid.UUID, permission string) (bool, error) {
+	a, ok := actor.From(ctx)
+	if !ok {
+		return false, domain.ErrUserNotFound
+	}
+
+	if a.Is(uid) {
+		return true, nil
+	}
+
+	if !a.Has(permission) {
+		return false, domain.ErrUserNotFound
+	}
+
+	// The lock is its own statement: a statement reading the permissions after it then sees role
+	// changes committed while it waited, which one combined statement's snapshot would miss.
+	targetID, err := s.repo.LockByUUID(ctx, uid)
+	if err != nil {
+		return false, err
+	}
+
+	held, target, err := s.permissions.GetActorAndTargetPermissions(ctx, a.UserID, targetID)
+	if err != nil {
+		return false, err
+	}
+
+	if !slices.Contains(held, permission) {
+		return false, actor.ErrForbidden
+	}
+
+	if !actor.Covers(held, target) {
+		return false, domain.ErrCannotManageStrongerUser
+	}
+
+	return false, nil
 }
 
 // hasAvatar checks if the user has an avatar URL.

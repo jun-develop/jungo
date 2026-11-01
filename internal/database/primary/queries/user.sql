@@ -10,6 +10,7 @@ SELECT * FROM users WHERE uuid = $1 AND deleted_at IS NULL;
 SELECT * FROM users WHERE email = $1 AND deleted_at IS NULL;
 
 -- name: ListUsers :many
+-- No count(*) OVER(): it makes Postgres read and sort every matching row to return one page.
 SELECT * FROM users
 WHERE deleted_at IS NULL
   AND (sqlc.arg(search)::text = '' OR email ILIKE '%' || sqlc.arg(search) || '%' OR first_name ILIKE '%' || sqlc.arg(search) || '%' OR last_name ILIKE '%' || sqlc.arg(search) || '%')
@@ -34,4 +35,12 @@ WHERE uuid = sqlc.arg(uuid) AND deleted_at IS NULL
 RETURNING *;
 
 -- name: DeleteUser :execrows
-UPDATE users SET deleted_at = now() WHERE uuid = $1 AND deleted_at IS NULL;
+-- avatar_url is cleared because DeleteUser removes the file.
+UPDATE users SET deleted_at = now(), avatar_url = NULL WHERE uuid = $1 AND deleted_at IS NULL;
+
+-- name: GetUserIDByUUID :one
+SELECT id FROM users WHERE uuid = $1 AND deleted_at IS NULL;
+
+-- name: LockUserByUUID :one
+-- Locks the user's row until the transaction ends, so changes to their roles wait for it.
+SELECT id FROM users WHERE uuid = $1 AND deleted_at IS NULL FOR UPDATE;

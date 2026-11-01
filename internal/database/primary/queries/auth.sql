@@ -15,16 +15,24 @@ FROM f_auth_login_session(
     sqlc.arg(new_family_uuid)::uuid
 ) AS s(action, family_uuid, old_family_uuid);
 
--- name: IssueTokenPair :exec
-INSERT INTO auth_tokens (user_id, family_uuid, type, hash, expires_at, ip_address, user_agent, device_id)
-VALUES
-    (sqlc.arg(user_id), sqlc.arg(family_uuid), 1, sqlc.arg(access_hash), sqlc.arg(access_expires_at),
-     sqlc.narg(ip_address), sqlc.narg(user_agent), sqlc.narg(device_id)),
-    (sqlc.arg(user_id), sqlc.arg(family_uuid), 2, sqlc.arg(refresh_hash), sqlc.arg(refresh_expires_at),
-     sqlc.narg(ip_address), sqlc.narg(user_agent), sqlc.narg(device_id));
+-- name: RefreshSession :one
+SELECT s.status::text                                                         AS status,
+       COALESCE(s.family_uuid, '00000000-0000-0000-0000-000000000000')::uuid  AS family_uuid,
+       COALESCE(s.user_uuid, '00000000-0000-0000-0000-000000000000')::uuid    AS user_uuid
+FROM f_auth_refresh_session(
+    sqlc.arg(hash)::text,
+    sqlc.narg(device_id)::text,
+    sqlc.narg(ip_address)::inet,
+    sqlc.narg(user_agent)::text,
+    sqlc.arg(access_hash)::text,
+    sqlc.arg(access_expires_at)::timestamptz,
+    sqlc.arg(refresh_hash)::text,
+    sqlc.arg(refresh_expires_at)::timestamptz
+) AS s(status, family_uuid, user_uuid);
 
 -- name: GetSessionByHash :one
--- Any token hash of a family -> its user and latest token pair.
+-- Any token hash of a family -> its user, their permission codes and latest token pair. The codes
+-- come with the session so an authenticated request needs one query, not two.
 WITH token AS (
     SELECT t.family_uuid, t.user_id FROM auth_tokens t WHERE t.hash = sqlc.arg(hash)
 ),
@@ -58,7 +66,14 @@ SELECT
     r.uuid               AS refresh_uuid,
     r.hash               AS refresh_hash,
     r.expires_at         AS refresh_expires_at,
-    r.revoked_at         AS refresh_revoked_at
+    r.revoked_at         AS refresh_revoked_at,
+    ARRAY(
+        SELECT DISTINCT rp.permission_code
+        FROM user_roles ur
+        JOIN role_permissions rp ON rp.role_id = ur.role_id
+        WHERE ur.user_id = u.id
+        ORDER BY rp.permission_code
+    )::text[]            AS permissions
 FROM token tk
 JOIN users u ON u.id = tk.user_id AND u.deleted_at IS NULL
 JOIN access_token a ON true
@@ -71,16 +86,40 @@ FROM auth_tokens t
 JOIN users u ON u.id = t.user_id AND u.deleted_at IS NULL
 WHERE t.hash = $1;
 
--- name: ConsumeRefreshToken :execrows
--- Zero rows means the token was already used or expired.
-UPDATE auth_tokens
-SET revoked_at = now(), revoked_reason = 'refresh'
-WHERE hash = $1 AND type = 2 AND revoked_at IS NULL AND expires_at > now();
-
 -- name: RevokeFamily :execrows
 UPDATE auth_tokens
 SET revoked_at = now(), revoked_reason = sqlc.arg(reason)
 WHERE family_uuid = sqlc.arg(family_uuid) AND revoked_at IS NULL;
+
+-- name: RevokeFamilyByHash :one
+-- No row means the token does not exist or its user was deleted.
+WITH token AS (
+    SELECT t.family_uuid FROM auth_tokens t
+    JOIN users u ON u.id = t.user_id AND u.deleted_at IS NULL
+    WHERE t.hash = sqlc.arg(hash)
+),
+revoked AS (
+    UPDATE auth_tokens a
+    SET revoked_at = now(), revoked_reason = sqlc.arg(reason)
+    WHERE a.family_uuid = (SELECT family_uuid FROM token) AND a.revoked_at IS NULL
+)
+SELECT family_uuid FROM token;
+
+-- name: RevokeAllByHash :one
+-- Revokes every session of the token's owner. No row means the token does not exist or its user
+-- was deleted.
+WITH token AS (
+    SELECT t.user_id FROM auth_tokens t
+    JOIN users u ON u.id = t.user_id AND u.deleted_at IS NULL
+    WHERE t.hash = sqlc.arg(hash)
+),
+revoked AS (
+    UPDATE auth_tokens a
+    SET revoked_at = now(), revoked_reason = sqlc.arg(reason)
+    WHERE a.user_id = (SELECT user_id FROM token) AND a.revoked_at IS NULL
+    RETURNING a.family_uuid
+)
+SELECT ARRAY(SELECT DISTINCT family_uuid FROM revoked)::uuid[] AS families FROM token;
 
 -- name: RevokeAllForUser :many
 UPDATE auth_tokens t

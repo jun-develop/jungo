@@ -32,6 +32,29 @@ type AuthToken struct {
 	UpdatedAt     *time.Time `db:"updated_at" json:"updated_at"`
 }
 
+type Permission struct {
+	Code      string    `db:"code" json:"code"`
+	GroupCode string    `db:"group_code" json:"group_code"`
+	CreatedAt time.Time `db:"created_at" json:"created_at"`
+}
+
+type Role struct {
+	ID   int64     `db:"id" json:"id"`
+	UUID uuid.UUID `db:"uuid" json:"uuid"`
+	Code string    `db:"code" json:"code"`
+	Name string    `db:"name" json:"name"`
+	// System roles cannot be changed through the API; super_admin is granted every permission by seeders/002_access.sql
+	IsSystem  bool       `db:"is_system" json:"is_system"`
+	CreatedAt time.Time  `db:"created_at" json:"created_at"`
+	UpdatedAt *time.Time `db:"updated_at" json:"updated_at"`
+}
+
+type RolePermission struct {
+	RoleID         int64     `db:"role_id" json:"role_id"`
+	PermissionCode string    `db:"permission_code" json:"permission_code"`
+	CreatedAt      time.Time `db:"created_at" json:"created_at"`
+}
+
 type User struct {
 	ID           int64      `db:"id" json:"id"`
 	UUID         uuid.UUID  `db:"uuid" json:"uuid"`
@@ -45,4 +68,10 @@ type User struct {
 	CreatedAt    time.Time  `db:"created_at" json:"created_at"`
 	UpdatedAt    *time.Time `db:"updated_at" json:"updated_at"`
 	DeletedAt    *time.Time `db:"deleted_at" json:"deleted_at"`
+}
+
+type UserRole struct {
+	UserID    int64     `db:"user_id" json:"user_id"`
+	RoleID    int64     `db:"role_id" json:"role_id"`
+	CreatedAt time.Time `db:"created_at" json:"created_at"`
 }

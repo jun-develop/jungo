@@ -3,6 +3,8 @@
 -- =============================================================================
 -- Rotates the user's session on the same device (or IP + User-Agent when no
 -- device id) or creates a new one. Returns action, family_uuid, old_family_uuid.
+-- An IPv6 client is matched by its /64, which it usually holds whole while its
+-- address rotates (as security.ClientKey does in Go).
 -- =============================================================================
 
 CREATE OR REPLACE FUNCTION f_auth_login_session(
@@ -24,6 +26,9 @@ RETURNS TABLE (
 LANGUAGE plpgsql
 AS $$
 DECLARE
+    v_client          CIDR := CASE WHEN family(p_ip_address) = 6
+                                   THEN network(set_masklen(p_ip_address, 64))
+                                   ELSE network(p_ip_address) END;
     v_existing_family UUID;
     v_updated_count   INT := 0;
 BEGIN
@@ -37,7 +42,7 @@ BEGIN
             (p_device_id IS NOT NULL AND t.device_id = p_device_id)
          OR (p_device_id IS NULL
              AND t.device_id IS NULL
-             AND t.ip_address IS NOT DISTINCT FROM p_ip_address
+             AND (t.ip_address <<= v_client OR (v_client IS NULL AND t.ip_address IS NULL))
              AND t.user_agent IS NOT DISTINCT FROM p_user_agent)
       )
     ORDER BY t.id DESC

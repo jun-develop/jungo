@@ -29,6 +29,12 @@ var Module = fx.Module("user",
 			fx.As(new(domain.UserService)),
 		),
 	),
+	fx.Provide(
+		fx.Annotate(
+			func() []string { return domain.Permissions },
+			fx.ResultTags(`group:"permissions,flatten"`),
+		),
+	),
 	fx.Provide(v1handler.NewUserHandler),
 	fx.Provide(
 		fx.Annotate(
@@ -59,10 +65,16 @@ var Module = fx.Module("user",
 	fx.Invoke(registerTranslations),
 )
 
-// registerTranslations registers domain-specific translation messages.
+// registerTranslations registers this feature's messages and the display names of its permissions.
 func registerTranslations(translator *i18n.Translator) {
 	translator.AddTranslations(map[string]map[string]string{
 		i18n.LangEN: {
+			"permission_group.users":  "Users",
+			"permission.users.read":   "View users",
+			"permission.users.create": "Create users",
+			"permission.users.update": "Update users",
+			"permission.users.delete": "Delete users",
+
 			"user_not_found":       "User not found",
 			"email_already_exists": "This email is already registered",
 			"password_too_long":    "Password is too long (max 72 bytes; accented characters count as more than one)",
@@ -74,6 +86,10 @@ func registerTranslations(translator *i18n.Translator) {
 			"user_deleted":         "User deleted successfully",
 			"avatar_uploaded":      "Avatar uploaded successfully",
 			"avatar_deleted":       "Avatar deleted successfully",
+
+			"cannot_manage_stronger_user": "This user holds permissions you do not hold yourself",
+			"cannot_change_own_status":    "You cannot change your own status",
+			"cannot_delete_self":          "You cannot delete your own account",
 		},
 	})
 }

@@ -1,3 +1,4 @@
+DROP FUNCTION IF EXISTS f_auth_refresh_session;
 DROP FUNCTION IF EXISTS f_auth_login_session;
 DROP TRIGGER IF EXISTS trg_auth_tokens_updated_at ON auth_tokens;
 DROP FUNCTION IF EXISTS f_set_auth_tokens_updated_at;

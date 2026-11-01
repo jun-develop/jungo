@@ -4,7 +4,6 @@ import (
 	"go.uber.org/fx"
 
 	"github.com/jun-develop/junkit/i18n"
-	"github.com/jun-develop/junkit/middleware"
 
 	"jungo/internal/console"
 	"jungo/internal/features/auth/adapter"
@@ -17,6 +16,7 @@ import (
 	v1route "jungo/internal/features/auth/router/v1"
 	"jungo/internal/features/auth/service"
 	userdomain "jungo/internal/features/user/domain"
+	"jungo/internal/middleware"
 	"jungo/internal/router"
 )
 
@@ -54,7 +54,6 @@ var Module = fx.Module("auth",
 			fx.As(new(domain.AuthService)),
 		),
 	),
-	// Access-token authenticator shared with other features' routers (middleware.BearerAuth).
 	fx.Provide(newAccessAuthenticator),
 	fx.Provide(v1handler.NewAuthHandler),
 	fx.Provide(

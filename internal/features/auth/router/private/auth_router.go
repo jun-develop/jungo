@@ -4,11 +4,11 @@ package private
 import (
 	"github.com/gin-gonic/gin"
 
-	"github.com/jun-develop/junkit/middleware"
 	"github.com/jun-develop/junkit/response"
 
 	"jungo/internal/config"
 	v1handler "jungo/internal/features/auth/handler/v1"
+	"jungo/internal/middleware"
 )
 
 // internalSecretHeader carries AUTH_INTERNAL_SECRET on internal calls.

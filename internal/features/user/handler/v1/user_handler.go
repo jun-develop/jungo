@@ -2,16 +2,14 @@ package v1
 
 import (
 	"net/http"
-	"path/filepath"
-	"strings"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/jun-develop/junkit/pagination"
 	"github.com/jun-develop/junkit/response"
+	"github.com/jun-develop/junkit/upload"
 	"github.com/jun-develop/junkit/validation"
 
-	"jungo/internal/common/httpx"
 	"jungo/internal/features/user/domain"
 	v1dto "jungo/internal/features/user/dto/v1"
 )
@@ -20,10 +18,8 @@ import (
 // is derived from it.
 const MaxAvatarFileSize = 5 << 20
 
-// allowedAvatarExtensions are the file extensions UploadAvatar accepts.
-var allowedAvatarExtensions = map[string]bool{
-	".jpg": true, ".jpeg": true, ".png": true, ".webp": true,
-}
+// avatarRule is what UploadAvatar accepts: a JPEG, PNG or WebP image up to MaxAvatarFileSize.
+var avatarRule = upload.Image(MaxAvatarFileSize)
 
 // UserHandler adapts HTTP requests to domain.UserService calls.
 type UserHandler struct {
@@ -40,8 +36,7 @@ func NewUserHandler(service domain.UserService, responder response.Responder, va
 // CreateUser handles POST /users.
 func (h *UserHandler) CreateUser(ctx *gin.Context) {
 	var req v1dto.CreateUserRequest
-	if err := ctx.ShouldBindJSON(&req); err != nil {
-		h.responder.SendWithData(ctx, http.StatusUnprocessableEntity, "validation_error", h.validator.GetValidationErrors(ctx, err))
+	if !validation.BindJSON(ctx, h.responder, h.validator, &req) {
 		return
 	}
 
@@ -56,7 +51,7 @@ func (h *UserHandler) CreateUser(ctx *gin.Context) {
 
 // GetUser handles GET /users/:uuid.
 func (h *UserHandler) GetUser(ctx *gin.Context) {
-	uid, ok := httpx.ParseUUID(ctx, h.responder, h.validator)
+	uid, ok := validation.ParseUUID(ctx, h.responder, h.validator)
 	if !ok {
 		return
 	}
@@ -73,8 +68,7 @@ func (h *UserHandler) GetUser(ctx *gin.Context) {
 // ListUsers handles GET /users.
 func (h *UserHandler) ListUsers(ctx *gin.Context) {
 	var req v1dto.ListUsersRequest
-	if err := ctx.ShouldBindQuery(&req); err != nil {
-		h.responder.SendWithData(ctx, http.StatusUnprocessableEntity, "validation_error", h.validator.GetValidationErrors(ctx, err))
+	if !validation.BindQuery(ctx, h.responder, h.validator, &req) {
 		return
 	}
 
@@ -92,14 +86,13 @@ func (h *UserHandler) ListUsers(ctx *gin.Context) {
 
 // UpdateUser handles PATCH /users/:uuid.
 func (h *UserHandler) UpdateUser(ctx *gin.Context) {
-	uid, ok := httpx.ParseUUID(ctx, h.responder, h.validator)
+	uid, ok := validation.ParseUUID(ctx, h.responder, h.validator)
 	if !ok {
 		return
 	}
 
 	var req v1dto.UpdateUserRequest
-	if err := ctx.ShouldBindJSON(&req); err != nil {
-		h.responder.SendWithData(ctx, http.StatusUnprocessableEntity, "validation_error", h.validator.GetValidationErrors(ctx, err))
+	if !validation.BindJSON(ctx, h.responder, h.validator, &req) {
 		return
 	}
 
@@ -114,7 +107,7 @@ func (h *UserHandler) UpdateUser(ctx *gin.Context) {
 
 // DeleteUser handles DELETE /users/:uuid.
 func (h *UserHandler) DeleteUser(ctx *gin.Context) {
-	uid, ok := httpx.ParseUUID(ctx, h.responder, h.validator)
+	uid, ok := validation.ParseUUID(ctx, h.responder, h.validator)
 	if !ok {
 		return
 	}
@@ -129,7 +122,7 @@ func (h *UserHandler) DeleteUser(ctx *gin.Context) {
 
 // UploadAvatar handles POST /users/:uuid/avatar.
 func (h *UserHandler) UploadAvatar(ctx *gin.Context) {
-	uid, ok := httpx.ParseUUID(ctx, h.responder, h.validator)
+	uid, ok := validation.ParseUUID(ctx, h.responder, h.validator)
 	if !ok {
 		return
 	}
@@ -140,17 +133,7 @@ func (h *UserHandler) UploadAvatar(ctx *gin.Context) {
 		return
 	}
 
-	if fileHeader.Size > MaxAvatarFileSize {
-		h.responder.Send(ctx, http.StatusBadRequest, "invalid_avatar_file")
-		return
-	}
-
-	if ext := extensionOf(fileHeader.Filename); !allowedAvatarExtensions[ext] {
-		h.responder.Send(ctx, http.StatusBadRequest, "invalid_avatar_file")
-		return
-	}
-
-	file, err := fileHeader.Open()
+	file, err := upload.Open(fileHeader, avatarRule)
 	if err != nil {
 		h.responder.Send(ctx, http.StatusBadRequest, "invalid_avatar_file")
 		return
@@ -172,7 +155,7 @@ func (h *UserHandler) UploadAvatar(ctx *gin.Context) {
 
 // DeleteAvatar handles DELETE /users/:uuid/avatar.
 func (h *UserHandler) DeleteAvatar(ctx *gin.Context) {
-	uid, ok := httpx.ParseUUID(ctx, h.responder, h.validator)
+	uid, ok := validation.ParseUUID(ctx, h.responder, h.validator)
 	if !ok {
 		return
 	}
@@ -184,9 +167,4 @@ func (h *UserHandler) DeleteAvatar(ctx *gin.Context) {
 	}
 
 	h.responder.SendWithData(ctx, http.StatusOK, "avatar_deleted", v1dto.NewUserResponse(user))
-}
-
-// extensionOf returns filename's lowercase extension, including the leading dot.
-func extensionOf(filename string) string {
-	return strings.ToLower(filepath.Ext(filename))
 }

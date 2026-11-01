@@ -37,6 +37,17 @@ const (
 	RevokedReasonUserDisabled = "user_disabled"
 )
 
+// Refresh outcomes reported by RefreshSession (f_auth_refresh_session).
+const (
+	RefreshRotated      = "rotated"
+	RefreshNotFound     = "not_found"
+	RefreshInvalidType  = "invalid_type"
+	RefreshUserInactive = "user_inactive"
+	RefreshReused       = "reused"
+	RefreshRevoked      = "revoked"
+	RefreshExpired      = "expired"
+)
+
 // Token status values reported by GetTokenDetails.
 const (
 	TokenStatusActive  = "active"
@@ -82,6 +93,8 @@ type Session struct {
 
 	Access  TokenState
 	Refresh TokenState
+
+	Permissions []string `json:"-"`
 }
 
 // Identity is the authenticated principal attached to a request by the auth middleware.
@@ -95,6 +108,26 @@ type Identity struct {
 
 	// Session is the session the access token belongs to (for /auth/me).
 	Session *Session
+}
+
+// SubjectID implements middleware.Subject.
+func (i *Identity) SubjectID() int64 {
+	return i.UserID
+}
+
+// SubjectUUID implements middleware.Subject.
+func (i *Identity) SubjectUUID() uuid.UUID {
+	return i.UserUUID
+}
+
+// Permissions implements middleware.PermissionCarrier. ok is false when the session came from the
+// cache: the Guard then loads the codes itself, through the permission cache.
+func (i *Identity) Permissions() (codes []string, ok bool) {
+	if i.Session == nil || i.Session.Permissions == nil {
+		return nil, false
+	}
+
+	return i.Session.Permissions, true
 }
 
 // TokenDetails describes a token for internal (service-to-service) inspection.
@@ -161,7 +194,8 @@ type TokenPair struct {
 	RefreshExpiresAt time.Time
 }
 
-// NewSessionParams holds the hashed token pair and client metadata to persist.
+// NewSessionParams holds the hashed token pair and client metadata to persist. RefreshSession
+// ignores UserID and FamilyUUID: it takes them from the refresh token.
 type NewSessionParams struct {
 	UserID           int64
 	FamilyUUID       uuid.UUID
@@ -182,6 +216,13 @@ type LoginSessionResult struct {
 	StaleFamilyUUID uuid.UUID
 }
 
+// RefreshResult reports what RefreshSession did.
+type RefreshResult struct {
+	Status     string
+	FamilyUUID uuid.UUID
+	UserUUID   uuid.UUID
+}
+
 // UserProvider reads users for authentication; implemented by an adapter over the user feature.
 type UserProvider interface {
 	GetCredentialsByEmail(ctx context.Context, email string) (*Credentials, error)
@@ -189,13 +230,13 @@ type UserProvider interface {
 
 // AuthRepository defines database operations for auth tokens.
 type AuthRepository interface {
-	WithTransaction(ctx context.Context, fn func(ctx context.Context) error) error
 	CreateLoginSession(ctx context.Context, params NewSessionParams) (*LoginSessionResult, error)
-	IssueTokenPair(ctx context.Context, params NewSessionParams) error
+	RefreshSession(ctx context.Context, hash string, params NewSessionParams) (*RefreshResult, error)
 	GetSessionByHash(ctx context.Context, hash string) (*Session, error)
 	GetTokenByHash(ctx context.Context, hash string) (*StoredToken, error)
-	ConsumeRefreshToken(ctx context.Context, hash string) (bool, error)
 	RevokeFamily(ctx context.Context, familyUUID uuid.UUID, reason string) error
+	RevokeFamilyByHash(ctx context.Context, hash, reason string) (uuid.UUID, error)
+	RevokeAllByHash(ctx context.Context, hash, reason string) ([]uuid.UUID, error)
 	RevokeAllForUser(ctx context.Context, userUUID uuid.UUID, reason string) ([]uuid.UUID, error)
 	ListActiveSessions(ctx context.Context, userID int64) ([]*SessionSummary, error)
 	CleanupTokens(ctx context.Context, before time.Time) (int64, error)
@@ -204,7 +245,7 @@ type AuthRepository interface {
 // SessionCache caches sessions by token hash.
 type SessionCache interface {
 	GetOrLoad(ctx context.Context, hash string, load func() (*Session, error)) (*Session, error)
-	InvalidateFamily(ctx context.Context, familyUUID uuid.UUID)
+	InvalidateFamilies(ctx context.Context, familyUUIDs ...uuid.UUID)
 }
 
 // LoginGuard throttles failed logins per IP and per email.
