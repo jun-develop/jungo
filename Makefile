@@ -113,6 +113,16 @@ db-seed: ## Apply every internal/database/primary/seeders/*.sql in order (demo d
 		psql $(PRIMARY_DSN) -v ON_ERROR_STOP=1 -f "$$file"; \
 	done
 
+.PHONY: export-db
+export-db: ## Dump the running stack's database (dev or prod) to ./<DB_NAME>_<timestamp>.sql
+	@file="$(DB_NAME)_$$(date +%Y%m%d_%H%M%S).sql"; \
+	if [ -n "$$($(COMPOSE_DEV) ps -q postgresql 2>/dev/null)" ]; then compose="$(COMPOSE_DEV)"; \
+	elif [ -n "$$($(COMPOSE_PROD) ps -q postgresql 2>/dev/null)" ]; then compose="$(COMPOSE_PROD)"; \
+	else echo "No running postgresql container found — start one first with 'make app-dev-bg' or 'make app-prod-bg'" && exit 1; fi; \
+	$$compose exec -T postgresql pg_dump -U "$(DB_USER)" -d "$(DB_NAME)" --no-owner --no-privileges > "$$file" \
+		|| { rm -f "$$file"; exit 1; }; \
+	echo "Exported $$file"
+
 # =============================================================================
 #  SQLC Generation
 #  SQLC: go install github.com/sqlc-dev/sqlc/cmd/sqlc@latest

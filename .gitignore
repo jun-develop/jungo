@@ -19,3 +19,4 @@ go.work.local
 go.work.local.sum
 .DS_Store
 .env
+/*.sql
