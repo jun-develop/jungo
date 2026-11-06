@@ -300,6 +300,11 @@ EOF
 	echo "${GREEN}Created .gitlab-ci.yml (push a v* tag to build a release)${RESET}"
 fi
 
+# A new app starts with its own history, not the template's.
+rm -rf .git
+git init -q
+echo "${GREEN}Reset git history (fresh repo, no commits yet)${RESET}"
+
 echo ""
 echo "${CYAN}== .env created ==${RESET}"
 echo "  APP_NAME=$APP_NAME"

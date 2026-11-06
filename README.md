@@ -74,7 +74,7 @@ Not sure everything is installed? `make app-init` (next step) re-checks whether 
 no extra checkout needed.
 
 ```bash
-make app-init              # interactive: app name, db name/user/pass, ports — creates .env
+make app-init              # interactive: app name, db, ports — creates .env, resets .git
 make app-dev-bg            # builds and starts App + PostgreSQL, detached
 make migrate-up            # applies migrations; in development also seeds demo accounts
 ```
@@ -164,7 +164,7 @@ Run `make help` for the full list.
 
 | Command | What it does |
 |---|---|
-| `make app-init` | Interactively create `.env` for a fresh clone (app name, db, ports) |
+| `make app-init` | Interactively create `.env` for a fresh clone (app name, db, ports) and reset git history |
 | `make app-dev-bg` | Build and start the dev stack (App + PostgreSQL), detached |
 | `make app-dev` | Same, but attached (streams logs, Ctrl+C to stop) |
 | `make app-dev WITH=cache` | Also start Redis and enable the `cache` package |
