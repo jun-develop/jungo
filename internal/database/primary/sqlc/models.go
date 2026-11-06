@@ -32,6 +32,17 @@ type AuthToken struct {
 	UpdatedAt     *time.Time `db:"updated_at" json:"updated_at"`
 }
 
+type PasswordResetToken struct {
+	ID     int64 `db:"id" json:"id"`
+	UserID int64 `db:"user_id" json:"user_id"`
+	// SHA-256 hex of the emailed token; the raw token is never stored
+	Hash      string    `db:"hash" json:"hash"`
+	ExpiresAt time.Time `db:"expires_at" json:"expires_at"`
+	// Set when the token is used or superseded by a newer request
+	UsedAt    *time.Time `db:"used_at" json:"used_at"`
+	CreatedAt time.Time  `db:"created_at" json:"created_at"`
+}
+
 type Permission struct {
 	Code      string    `db:"code" json:"code"`
 	GroupCode string    `db:"group_code" json:"group_code"`

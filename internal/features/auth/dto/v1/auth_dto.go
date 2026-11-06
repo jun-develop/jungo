@@ -26,6 +26,18 @@ type RefreshRequest struct {
 	RefreshToken string `json:"refresh_token" binding:"required,max=512"`
 }
 
+// ForgotPasswordRequest is the request body for POST /auth/forgot-password.
+type ForgotPasswordRequest struct {
+	Email string `json:"email" binding:"required,email,max=150"`
+}
+
+// ResetPasswordRequest is the request body for POST /auth/reset-password; Token comes from the
+// emailed link.
+type ResetPasswordRequest struct {
+	Token    string `json:"token" binding:"required,max=128"`
+	Password string `json:"password" binding:"required,min=8,max=72,password_strong"`
+}
+
 // TokenRequest is the request body for the internal token endpoints.
 type TokenRequest struct {
 	Token string `json:"token" binding:"required,max=512"`

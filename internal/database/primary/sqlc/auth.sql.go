@@ -13,6 +13,19 @@ import (
 	"github.com/google/uuid"
 )
 
+const cleanupPasswordResetTokens = `-- name: CleanupPasswordResetTokens :execrows
+DELETE FROM password_reset_tokens
+WHERE expires_at < $1 OR (used_at IS NOT NULL AND used_at < $1)
+`
+
+func (q *Queries) CleanupPasswordResetTokens(ctx context.Context, before time.Time) (int64, error) {
+	result, err := q.db.Exec(ctx, cleanupPasswordResetTokens, before)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const cleanupTokens = `-- name: CleanupTokens :execrows
 DELETE FROM auth_tokens t
 WHERE (t.expires_at < $1 OR (t.revoked_at IS NOT NULL AND t.revoked_at < $1))
@@ -37,6 +50,28 @@ func (q *Queries) CleanupTokens(ctx context.Context, before time.Time) (int64, e
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const consumePasswordResetToken = `-- name: ConsumePasswordResetToken :one
+UPDATE password_reset_tokens t
+SET used_at = now()
+FROM users u
+WHERE t.hash = $1 AND t.used_at IS NULL AND t.expires_at > now()
+  AND u.id = t.user_id AND u.deleted_at IS NULL AND u.status = 1
+RETURNING t.user_id, u.uuid AS user_uuid
+`
+
+type ConsumePasswordResetTokenRow struct {
+	UserID   int64     `db:"user_id" json:"user_id"`
+	UserUUID uuid.UUID `db:"user_uuid" json:"user_uuid"`
+}
+
+// Marks a valid token used and returns its active user; no row means invalid, used or expired.
+func (q *Queries) ConsumePasswordResetToken(ctx context.Context, hash string) (ConsumePasswordResetTokenRow, error) {
+	row := q.db.QueryRow(ctx, consumePasswordResetToken, hash)
+	var i ConsumePasswordResetTokenRow
+	err := row.Scan(&i.UserID, &i.UserUUID)
+	return i, err
 }
 
 const createLoginSession = `-- name: CreateLoginSession :one
@@ -90,6 +125,27 @@ func (q *Queries) CreateLoginSession(ctx context.Context, arg CreateLoginSession
 	var i CreateLoginSessionRow
 	err := row.Scan(&i.Action, &i.FamilyUUID, &i.OldFamilyUUID)
 	return i, err
+}
+
+const createPasswordResetToken = `-- name: CreatePasswordResetToken :exec
+WITH superseded AS (
+    UPDATE password_reset_tokens SET used_at = now()
+    WHERE user_id = $1 AND used_at IS NULL
+)
+INSERT INTO password_reset_tokens (user_id, hash, expires_at)
+VALUES ($1, $2, $3)
+`
+
+type CreatePasswordResetTokenParams struct {
+	UserID    int64     `db:"user_id" json:"user_id"`
+	Hash      string    `db:"hash" json:"hash"`
+	ExpiresAt time.Time `db:"expires_at" json:"expires_at"`
+}
+
+// Supersedes the user's earlier unused tokens, so only the latest emailed link works.
+func (q *Queries) CreatePasswordResetToken(ctx context.Context, arg CreatePasswordResetTokenParams) error {
+	_, err := q.db.Exec(ctx, createPasswordResetToken, arg.UserID, arg.Hash, arg.ExpiresAt)
+	return err
 }
 
 const getSessionByHash = `-- name: GetSessionByHash :one

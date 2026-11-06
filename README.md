@@ -220,6 +220,7 @@ All configuration is environment variables in `.env` (created by `make app-init`
 | `CACHE_REDIS_ENABLE` | `false` (default): no cache, sessions and permissions are read from the database on every request; `true`: Redis (start it with `WITH=cache`), shared by every instance |
 | `STORAGE_BASE_DIR` / `STORAGE_BASE_URL` | Where uploaded avatars are stored and served from |
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | Ops alerts for panics/rate-limit breaches; empty = safe no-op |
+| `MAIL_*` | Outgoing email via junkit `mailer`. `MAIL_DRIVER=log` (default) only logs emails; `smtp` works with any provider (Brevo, Resend, SES, ...), `brevo` uses the Brevo API. Changing provider is config only |
 | `RECAPTCHA_MOCK` | Verifier always succeeds when true; honored in development only |
 
 ### Container resource limits
@@ -455,6 +456,32 @@ curl -X POST http://localhost:<API_SERVER_PORT>/api/internal/auth/revoke-all \
 }
 ```
 
+### Password reset
+
+Needs email (`MAIL_*`, see [Configuration](#5-configuration)) and `AUTH_PASSWORD_RESET_URL`, the
+frontend page the emailed link opens. Without them `forgot-password` answers 500
+`password_reset_unavailable` and the app log says what to set. In development `MAIL_DRIVER=log`
+is enough: the email, link included, is written to the log instead of sent.
+
+```bash
+# 1. Request a link. Same answer whether or not the email is registered.
+curl -X POST http://localhost:<API_SERVER_PORT>/api/v1/auth/forgot-password \
+  -H "Content-Type: application/json" \
+  -d '{"email": "admin@jungo.com"}'
+
+# 2. The email links to <AUTH_PASSWORD_RESET_URL>?token=<token>; the page posts the token back.
+curl -X POST http://localhost:<API_SERVER_PORT>/api/v1/auth/reset-password \
+  -H "Content-Type: application/json" \
+  -d '{"token": "<token>", "password": "New-passw0rd!"}'
+```
+
+- The link works once and expires after `AUTH_PASSWORD_RESET_TTL`; a newer request replaces it.
+- A reset logs the user out of every device.
+- Abuse: each IP may ask `AUTH_PASSWORD_RESET_IP_MAX` times and each email
+  `AUTH_PASSWORD_RESET_EMAIL_MAX` times per `AUTH_PASSWORD_RESET_WINDOW`, then gets 429. Only
+  registered, active emails are mailed, and the email is sent in the background so response time
+  does not reveal registered emails.
+
 <a id="authentication-configuration"></a>
 ### Configuration
 
@@ -474,13 +501,16 @@ curl -X POST http://localhost:<API_SERVER_PORT>/api/internal/auth/revoke-all \
 | `AUTH_LOGIN_MAX_ATTEMPTS` / `AUTH_LOGIN_BLOCK_WINDOW` | `5` / `15m` | Failed logins per IP before a short block |
 | `AUTH_LOGIN_BLACKLIST_ATTEMPTS` / `AUTH_LOGIN_BLACKLIST_WINDOW` | `8` / `24h` | Failed logins per IP before a long block (+ Telegram alert if configured) |
 | `AUTH_LOGIN_EMAIL_MAX_ATTEMPTS` | `10` | Failed logins per email (any IP) within `AUTH_LOGIN_BLOCK_WINDOW` |
+| `AUTH_PASSWORD_RESET_URL` | — | Frontend page the reset email links to (`?token=` is appended); empty disables password reset |
+| `AUTH_PASSWORD_RESET_TTL` | `30m` | How long a reset link works |
+| `AUTH_PASSWORD_RESET_IP_MAX` / `AUTH_PASSWORD_RESET_EMAIL_MAX` / `AUTH_PASSWORD_RESET_WINDOW` | `5` / `3` / `1h` | Reset requests allowed per IP and per email within the window |
 
 ### Operations
 
 - **First user**: seeded in development (see [Demo accounts](#demo-accounts)); elsewhere
   `make console CMD="user:create" ARGS="-email=... -first-name=... -last-name=..."`, then make them
   `super_admin` with SQL (see [Permissions](#permissions)).
-- **Cleanup**: run `make console CMD="auth:cleanup-tokens"` daily (cron) to delete old tokens.
+- **Cleanup**: run `make console CMD="auth:cleanup-tokens"` daily (cron) to delete old tokens (password reset tokens included).
 - **Leaked key**: replace both `AUTH_TOKEN_*` keys and restart — every user must log in again.
 - **Several app instances**: without Redis nothing is cached, so a logout, a disabled user or a removed permission applies on every instance at once; only login limits are counted per instance (in memory). Enable Redis (`CACHE_REDIS_ENABLE=true`) to save the database reads and share login limits.
 - **Disabling or deleting a user** logs them out of every device immediately.

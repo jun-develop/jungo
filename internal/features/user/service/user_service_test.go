@@ -61,6 +61,10 @@ func (f *fakeUserRepository) Delete(ctx context.Context, uid uuid.UUID) error {
 	return f.DeleteFunc(ctx, uid)
 }
 
+func (f *fakeUserRepository) UpdatePassword(context.Context, int64, string) error {
+	panic("not used by these tests")
+}
+
 func (f *fakeUserRepository) GetIDByUUID(ctx context.Context, uid uuid.UUID) (int64, error) {
 	return f.LockFunc(ctx, uid)
 }

@@ -73,6 +73,9 @@ func NormalizeEmail(email string) string {
 type Credentials struct {
 	ID           int64
 	UUID         uuid.UUID
+	Email        string
+	FirstName    string
+	LastName     string
 	PasswordHash string
 	Status       int16
 }
@@ -122,6 +125,7 @@ type UserRepository interface {
 	GetByUUID(ctx context.Context, uid uuid.UUID) (*User, error)
 	GetByEmail(ctx context.Context, email string) (*User, error)
 	GetCredentialsByEmail(ctx context.Context, email string) (*Credentials, error)
+	UpdatePassword(ctx context.Context, id int64, passwordHash string) error
 	List(ctx context.Context, filter UserListFilter) ([]*User, int64, error)
 	Update(ctx context.Context, uid uuid.UUID, input UpdateUserInput) (*User, error)
 	Delete(ctx context.Context, uid uuid.UUID) error
@@ -134,6 +138,7 @@ type UserService interface {
 	CreateUser(ctx context.Context, input CreateUserInput) (*User, error)
 	GetUser(ctx context.Context, uid uuid.UUID) (*User, error)
 	GetCredentialsByEmail(ctx context.Context, email string) (*Credentials, error)
+	SetPasswordHash(ctx context.Context, id int64, passwordHash string) error
 	GetUsers(ctx context.Context, filter UserListFilter) ([]*User, int64, error)
 	UpdateUser(ctx context.Context, uid uuid.UUID, input UpdateUserInput) (*User, error)
 	DeleteUser(ctx context.Context, uid uuid.UUID) error

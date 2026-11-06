@@ -15,6 +15,7 @@ import (
 	"github.com/jun-develop/junkit/httpclient"
 	"github.com/jun-develop/junkit/i18n"
 	"github.com/jun-develop/junkit/logger"
+	"github.com/jun-develop/junkit/mailer"
 	"github.com/jun-develop/junkit/notification"
 	"github.com/jun-develop/junkit/recaptcha"
 	"github.com/jun-develop/junkit/response"
@@ -91,6 +92,9 @@ func CoreModules(cfg *config.Config) []fx.Option {
 
 		fx.Provide(provideRecaptchaOptions),
 		recaptcha.Module,
+
+		fx.Provide(provideMailerOptions),
+		mailer.Module,
 
 		// =====================================================================
 		// FEATURES
@@ -283,6 +287,26 @@ func provideTelegramOptions(cfg *config.Config) telegram.Options {
 // provideNotificationOptions routes notifications to the configured Telegram chat.
 func provideNotificationOptions(cfg *config.Config) notification.Options {
 	return notification.Options{TelegramChatID: cfg.Telegram.ChatID, Environment: cfg.Environment}
+}
+
+// provideMailerOptions builds mailer.Options from cfg.Mail; warns when the log driver runs outside development.
+func provideMailerOptions(cfg *config.Config, log *zap.Logger) mailer.Options {
+	m := cfg.Mail
+	if !cfg.IsDevelopment() && (m.Driver == "" || m.Driver == string(mailer.DriverLog)) {
+		log.Warn("mailer: MAIL_DRIVER=log outside development; emails are logged, not sent")
+	}
+
+	return mailer.Options{
+		Driver: mailer.Driver(m.Driver),
+		From:   m.From,
+		SMTP: mailer.SMTPOptions{
+			Host:     m.SMTPHost,
+			Port:     m.SMTPPort,
+			Username: m.SMTPUsername,
+			Password: m.SMTPPassword,
+		},
+		Brevo: mailer.BrevoOptions{APIKey: m.BrevoAPIKey},
+	}
 }
 
 // provideRecaptchaOptions builds recaptcha.Options from cfg.Recaptcha; the mock is used only in

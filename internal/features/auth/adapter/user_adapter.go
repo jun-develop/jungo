@@ -33,7 +33,24 @@ func (a *UserAdapter) GetCredentialsByEmail(ctx context.Context, email string) (
 	return &authdomain.Credentials{
 		UserID:       creds.ID,
 		UserUUID:     creds.UUID,
+		Email:        creds.Email,
+		FirstName:    creds.FirstName,
+		LastName:     creds.LastName,
 		PasswordHash: creds.PasswordHash,
 		Active:       creds.Status == userdomain.UserStatusActive,
 	}, nil
+}
+
+// SetPasswordHash implements authdomain.UserProvider; it returns authdomain.ErrUserNotFound for an
+// unknown or deleted user.
+func (a *UserAdapter) SetPasswordHash(ctx context.Context, userID int64, passwordHash string) error {
+	if err := a.userService.SetPasswordHash(ctx, userID, passwordHash); err != nil {
+		if errors.Is(err, userdomain.ErrUserNotFound) {
+			return authdomain.ErrUserNotFound
+		}
+
+		return err
+	}
+
+	return nil
 }

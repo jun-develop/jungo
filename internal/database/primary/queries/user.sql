@@ -44,3 +44,6 @@ SELECT id FROM users WHERE uuid = $1 AND deleted_at IS NULL;
 -- name: LockUserByUUID :one
 -- Locks the user's row until the transaction ends, so changes to their roles wait for it.
 SELECT id FROM users WHERE uuid = $1 AND deleted_at IS NULL FOR UPDATE;
+
+-- name: UpdateUserPassword :execrows
+UPDATE users SET password_hash = sqlc.arg(password_hash) WHERE id = sqlc.arg(id) AND deleted_at IS NULL;

@@ -62,6 +62,37 @@ func (h *AuthHandler) Refresh(ctx *gin.Context) {
 	h.responder.SendWithData(ctx, http.StatusOK, "refresh_success", v1dto.NewTokenPairResponse(pair, time.Now()))
 }
 
+// ForgotPassword handles POST /auth/forgot-password. The response is the same whether or not the
+// email is registered.
+func (h *AuthHandler) ForgotPassword(ctx *gin.Context) {
+	var req v1dto.ForgotPasswordRequest
+	if !validation.BindJSON(ctx, h.responder, h.validator, &req) {
+		return
+	}
+
+	if err := h.service.ForgotPassword(ctx.Request.Context(), req.Email, clientMetadata(ctx)); err != nil {
+		h.responder.Error(ctx, err)
+		return
+	}
+
+	h.responder.Send(ctx, http.StatusOK, "password_reset_requested")
+}
+
+// ResetPassword handles POST /auth/reset-password.
+func (h *AuthHandler) ResetPassword(ctx *gin.Context) {
+	var req v1dto.ResetPasswordRequest
+	if !validation.BindJSON(ctx, h.responder, h.validator, &req) {
+		return
+	}
+
+	if err := h.service.ResetPassword(ctx.Request.Context(), req.Token, req.Password); err != nil {
+		h.responder.Error(ctx, err)
+		return
+	}
+
+	h.responder.Send(ctx, http.StatusOK, "password_reset_success")
+}
+
 // Logout handles POST /auth/logout.
 func (h *AuthHandler) Logout(ctx *gin.Context) {
 	identity := security.MustGetIdentity[*domain.Identity](ctx)

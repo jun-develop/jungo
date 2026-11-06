@@ -150,3 +150,25 @@ WHERE (t.expires_at < sqlc.arg(before) OR (t.revoked_at IS NOT NULL AND t.revoke
           WHERE l.family_uuid = t.family_uuid AND l.revoked_at IS NULL AND l.expires_at > now()
       )
   );
+
+-- name: CreatePasswordResetToken :exec
+-- Supersedes the user's earlier unused tokens, so only the latest emailed link works.
+WITH superseded AS (
+    UPDATE password_reset_tokens SET used_at = now()
+    WHERE user_id = sqlc.arg(user_id) AND used_at IS NULL
+)
+INSERT INTO password_reset_tokens (user_id, hash, expires_at)
+VALUES (sqlc.arg(user_id), sqlc.arg(hash), sqlc.arg(expires_at));
+
+-- name: ConsumePasswordResetToken :one
+-- Marks a valid token used and returns its active user; no row means invalid, used or expired.
+UPDATE password_reset_tokens t
+SET used_at = now()
+FROM users u
+WHERE t.hash = sqlc.arg(hash) AND t.used_at IS NULL AND t.expires_at > now()
+  AND u.id = t.user_id AND u.deleted_at IS NULL AND u.status = 1
+RETURNING t.user_id, u.uuid AS user_uuid;
+
+-- name: CleanupPasswordResetTokens :execrows
+DELETE FROM password_reset_tokens
+WHERE expires_at < sqlc.arg(before) OR (used_at IS NOT NULL AND used_at < sqlc.arg(before));

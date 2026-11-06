@@ -175,7 +175,35 @@ func (r *AuthRepository) ListActiveSessions(ctx context.Context, userID int64) (
 
 // CleanupTokens implements domain.AuthRepository.
 func (r *AuthRepository) CleanupTokens(ctx context.Context, before time.Time) (int64, error) {
-	return r.db.Queries(ctx).CleanupTokens(ctx, before)
+	tokens, err := r.db.Queries(ctx).CleanupTokens(ctx, before)
+	if err != nil {
+		return 0, err
+	}
+
+	resets, err := r.db.Queries(ctx).CleanupPasswordResetTokens(ctx, before)
+
+	return tokens + resets, err
+}
+
+// CreatePasswordResetToken implements domain.AuthRepository; it supersedes the user's earlier
+// unused tokens.
+func (r *AuthRepository) CreatePasswordResetToken(ctx context.Context, userID int64, hash string, expiresAt time.Time) error {
+	return r.db.Queries(ctx).CreatePasswordResetToken(ctx, sqlc.CreatePasswordResetTokenParams{
+		UserID:    userID,
+		Hash:      hash,
+		ExpiresAt: expiresAt,
+	})
+}
+
+// ConsumePasswordResetToken implements domain.AuthRepository; it returns ErrInvalidResetToken for
+// an unknown, used or expired token, or one whose user is no longer active.
+func (r *AuthRepository) ConsumePasswordResetToken(ctx context.Context, hash string) (*domain.PasswordResetOwner, error) {
+	row, err := r.db.Queries(ctx).ConsumePasswordResetToken(ctx, hash)
+	if err != nil {
+		return nil, database.MatchNotFound(err, domain.ErrInvalidResetToken)
+	}
+
+	return &domain.PasswordResetOwner{UserID: row.UserID, UserUUID: row.UserUUID}, nil
 }
 
 // mapSession converts a generated sqlc.GetSessionByHashRow to the domain model.

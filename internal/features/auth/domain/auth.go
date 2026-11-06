@@ -30,11 +30,12 @@ func (t TokenType) String() string {
 
 // Revocation reasons (auth_tokens.revoked_reason).
 const (
-	RevokedReasonLogout       = "logout"
-	RevokedReasonRefresh      = "refresh"
-	RevokedReasonReuse        = "reuse"
-	RevokedReasonAdmin        = "admin"
-	RevokedReasonUserDisabled = "user_disabled"
+	RevokedReasonLogout        = "logout"
+	RevokedReasonRefresh       = "refresh"
+	RevokedReasonReuse         = "reuse"
+	RevokedReasonAdmin         = "admin"
+	RevokedReasonUserDisabled  = "user_disabled"
+	RevokedReasonPasswordReset = "password_reset"
 )
 
 // Refresh outcomes reported by RefreshSession (f_auth_refresh_session).
@@ -167,6 +168,9 @@ type SessionSummary struct {
 type Credentials struct {
 	UserID       int64
 	UserUUID     uuid.UUID
+	Email        string
+	FirstName    string
+	LastName     string
 	PasswordHash string
 	Active       bool
 }
@@ -223,9 +227,17 @@ type RefreshResult struct {
 	UserUUID   uuid.UUID
 }
 
-// UserProvider reads users for authentication; implemented by an adapter over the user feature.
+// PasswordResetOwner is the active user a consumed password reset token belongs to.
+type PasswordResetOwner struct {
+	UserID   int64
+	UserUUID uuid.UUID
+}
+
+// UserProvider reads and updates users for authentication; implemented by an adapter over the
+// user feature.
 type UserProvider interface {
 	GetCredentialsByEmail(ctx context.Context, email string) (*Credentials, error)
+	SetPasswordHash(ctx context.Context, userID int64, passwordHash string) error
 }
 
 // AuthRepository defines database operations for auth tokens.
@@ -240,6 +252,8 @@ type AuthRepository interface {
 	RevokeAllForUser(ctx context.Context, userUUID uuid.UUID, reason string) ([]uuid.UUID, error)
 	ListActiveSessions(ctx context.Context, userID int64) ([]*SessionSummary, error)
 	CleanupTokens(ctx context.Context, before time.Time) (int64, error)
+	CreatePasswordResetToken(ctx context.Context, userID int64, hash string, expiresAt time.Time) error
+	ConsumePasswordResetToken(ctx context.Context, hash string) (*PasswordResetOwner, error)
 }
 
 // SessionCache caches sessions by token hash.
@@ -248,11 +262,12 @@ type SessionCache interface {
 	InvalidateFamilies(ctx context.Context, familyUUIDs ...uuid.UUID)
 }
 
-// LoginGuard throttles failed logins per IP and per email.
+// LoginGuard throttles failed logins and password reset requests per IP and per email.
 type LoginGuard interface {
 	Attempt(ctx context.Context, ip, email string) (int64, error)
 	RecordFailure(ctx context.Context, ip string)
 	Succeeded(ctx context.Context, ip, email string)
+	AttemptPasswordReset(ctx context.Context, ip, email string) error
 }
 
 // AuthService defines business logic for authentication.
@@ -267,4 +282,6 @@ type AuthService interface {
 	RevokeToken(ctx context.Context, token string) error
 	RevokeAllTokens(ctx context.Context, token string) error
 	CleanupTokens(ctx context.Context, retention time.Duration) (int64, error)
+	ForgotPassword(ctx context.Context, email string, meta Metadata) error
+	ResetPassword(ctx context.Context, token, password string) error
 }

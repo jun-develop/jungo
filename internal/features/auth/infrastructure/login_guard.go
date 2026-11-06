@@ -103,6 +103,31 @@ func (g *LoginGuard) Succeeded(ctx context.Context, ip, email string) {
 	_ = g.counters.Delete(ctx, emailKey(email))
 }
 
+// AttemptPasswordReset implements domain.LoginGuard; it counts every request per IP, then per
+// email whether or not the email is registered, and returns ErrTooManyResetRequests over either
+// limit. This caps the emails one client can make us send. A cache error refuses the request.
+func (g *LoginGuard) AttemptPasswordReset(ctx context.Context, ip, email string) error {
+	perIP, err := g.incr(ctx, "auth:reset:ip:"+security.ClientKey(ip), g.cfg.PasswordResetWindow)
+	if err != nil {
+		return err
+	}
+
+	if perIP > g.cfg.PasswordResetIPMax {
+		return domain.ErrTooManyResetRequests
+	}
+
+	perEmail, err := g.incr(ctx, "auth:reset:email:"+hashEmail(email), g.cfg.PasswordResetWindow)
+	if err != nil {
+		return err
+	}
+
+	if perEmail > g.cfg.PasswordResetEmailMax {
+		return domain.ErrTooManyResetRequests
+	}
+
+	return nil
+}
+
 // incr increments a counter, logging a failure.
 func (g *LoginGuard) incr(ctx context.Context, key string, ttl time.Duration) (int64, error) {
 	n, err := g.counters.Incr(ctx, key, ttl)
@@ -148,5 +173,10 @@ func ipLongKey(ip string) string {
 
 // emailKey returns the counter key for email (hashed, so addresses are not stored).
 func emailKey(email string) string {
-	return "auth:login:email:" + security.HashToken(strings.ToLower(strings.TrimSpace(email)))
+	return "auth:login:email:" + hashEmail(email)
+}
+
+// hashEmail returns a normalized, hashed email for counter keys, so addresses are not stored.
+func hashEmail(email string) string {
+	return security.HashToken(strings.ToLower(strings.TrimSpace(email)))
 }

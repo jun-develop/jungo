@@ -34,6 +34,8 @@ func (r *AuthRoutes) Register(group *gin.RouterGroup) {
 
 	items.POST("/login", r.guard.Public(r.handler.Login))
 	items.POST("/refresh", r.guard.Public(r.handler.Refresh))
+	items.POST("/forgot-password", r.guard.Public(r.handler.ForgotPassword))
+	items.POST("/reset-password", r.guard.Public(r.handler.ResetPassword))
 
 	protected := items.Group("", middleware.BearerAuth(r.authenticator, r.responder, middleware.BearerAuthOptions{}))
 	protected.POST("/logout", r.guard.Authenticated(r.handler.Logout))

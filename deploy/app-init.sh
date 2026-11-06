@@ -151,6 +151,14 @@ while true; do
 	break
 done
 
+while true; do
+	CI_PROVIDER=$(prompt "Release CI (github/gitlab/none)" "github")
+	case "$CI_PROVIDER" in
+		github | gitlab | none) break ;;
+		*) echo "${RED}  -> Must be github, gitlab or none.${RESET}" >&2 ;;
+	esac
+done
+
 AUTH_TOKEN_HMAC_SECRET=$(gen_key)
 AUTH_TOKEN_ENCRYPTION_KEY=$(gen_key)
 AUTH_INTERNAL_SECRET=$(gen_secret)
@@ -185,6 +193,112 @@ set_env "AUTH_INTERNAL_SECRET" "$AUTH_INTERNAL_SECRET"
 set_env "TRACER_DEBUG_VALUE" "$TRACER_DEBUG_VALUE"
 rm -f .env.bak
 trap - ERR INT TERM
+
+# Release pipeline: GitHub reads .github/workflows/, GitLab reads .gitlab-ci.yml.
+# In the heredocs, \$ keeps CI variables literal; only APP_NAME / GO_VERSION expand here.
+RELEASE_WORKFLOW=.github/workflows/release.yml
+if [ "$CI_PROVIDER" = github ] && [ ! -f "$RELEASE_WORKFLOW" ]; then
+	mkdir -p .github/workflows
+	cat >"$RELEASE_WORKFLOW" <<EOF
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - run: go test ./...
+
+      - name: Build
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: arm64
+        run: |
+          go build -ldflags="-s -w" -o dist/api ./cmd/api
+          go build -ldflags="-s -w" -o dist/console ./cmd/console
+          mkdir -p dist/internal/database/primary dist/storage/uploads dist/storage/logs
+          cp -r internal/database/primary/migrations internal/database/primary/functions dist/internal/database/primary/
+          cp .env.example dist/
+          tar -czf ${APP_NAME}-\${GITHUB_REF_NAME}-linux-arm64.tar.gz -C dist .
+          # the deploy tool fetches these exact asset names
+          cp dist/api api-linux-arm64
+          cp dist/console console-linux-arm64
+
+      - run: gh release create "\$GITHUB_REF_NAME" ${APP_NAME}-*.tar.gz api-linux-arm64 console-linux-arm64 --generate-notes
+        env:
+          GH_TOKEN: \${{ github.token }}
+EOF
+	echo "${GREEN}Created $RELEASE_WORKFLOW (push a v* tag to build a release)${RESET}"
+fi
+
+if [ "$CI_PROVIDER" = gitlab ] && [ ! -f .gitlab-ci.yml ]; then
+	GO_VERSION=$(awk '/^go /{print $2}' go.mod)
+	cat >.gitlab-ci.yml <<EOF
+# Push a v* tag to build and publish a release.
+stages: [build, release]
+
+variables:
+  PACKAGE_URL: "\${CI_API_V4_URL}/projects/\${CI_PROJECT_ID}/packages/generic/${APP_NAME}/\${CI_COMMIT_TAG}"
+
+build:
+  stage: build
+  image: golang:${GO_VERSION}
+  rules:
+    - if: \$CI_COMMIT_TAG =~ /^v/
+  variables:
+    CGO_ENABLED: "0"
+    GOOS: linux
+    GOARCH: arm64
+  script:
+    - CGO_ENABLED=1 GOOS= GOARCH= go test ./...
+    - go build -ldflags="-s -w" -o dist/api ./cmd/api
+    - go build -ldflags="-s -w" -o dist/console ./cmd/console
+    - mkdir -p dist/internal/database/primary dist/storage/uploads dist/storage/logs
+    - cp -r internal/database/primary/migrations internal/database/primary/functions dist/internal/database/primary/
+    - cp .env.example dist/
+    - tar -czf ${APP_NAME}-\${CI_COMMIT_TAG}-linux-arm64.tar.gz -C dist .
+    # the deploy tool fetches these exact asset names
+    - cp dist/api api-linux-arm64
+    - cp dist/console console-linux-arm64
+    # GitLab releases only hold links, so the files go to the project's generic package registry
+    - |
+      for f in ${APP_NAME}-\${CI_COMMIT_TAG}-linux-arm64.tar.gz api-linux-arm64 console-linux-arm64; do
+        curl --fail-with-body -H "JOB-TOKEN: \${CI_JOB_TOKEN}" --upload-file "\$f" "\${PACKAGE_URL}/\$f"
+      done
+
+release:
+  stage: release
+  image: registry.gitlab.com/gitlab-org/cli:latest
+  rules:
+    - if: \$CI_COMMIT_TAG =~ /^v/
+  script:
+    - echo "Releasing \$CI_COMMIT_TAG"
+  release:
+    tag_name: \$CI_COMMIT_TAG
+    description: "Release \$CI_COMMIT_TAG"
+    assets:
+      links:
+        - name: ${APP_NAME}-\${CI_COMMIT_TAG}-linux-arm64.tar.gz
+          url: "\${PACKAGE_URL}/${APP_NAME}-\${CI_COMMIT_TAG}-linux-arm64.tar.gz"
+        - name: api-linux-arm64
+          url: "\${PACKAGE_URL}/api-linux-arm64"
+        - name: console-linux-arm64
+          url: "\${PACKAGE_URL}/console-linux-arm64"
+EOF
+	echo "${GREEN}Created .gitlab-ci.yml (push a v* tag to build a release)${RESET}"
+fi
 
 echo ""
 echo "${CYAN}== .env created ==${RESET}"

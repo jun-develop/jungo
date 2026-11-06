@@ -252,3 +252,20 @@ func (q *Queries) UpdateUser(ctx context.Context, arg UpdateUserParams) (User, e
 	)
 	return i, err
 }
+
+const updateUserPassword = `-- name: UpdateUserPassword :execrows
+UPDATE users SET password_hash = $1 WHERE id = $2 AND deleted_at IS NULL
+`
+
+type UpdateUserPasswordParams struct {
+	PasswordHash string `db:"password_hash" json:"password_hash"`
+	ID           int64  `db:"id" json:"id"`
+}
+
+func (q *Queries) UpdateUserPassword(ctx context.Context, arg UpdateUserPasswordParams) (int64, error) {
+	result, err := q.db.Exec(ctx, updateUserPassword, arg.PasswordHash, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}

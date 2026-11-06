@@ -77,9 +77,26 @@ func (r *UserRepository) GetCredentialsByEmail(ctx context.Context, email string
 	return &domain.Credentials{
 		ID:           row.ID,
 		UUID:         row.UUID,
+		Email:        row.Email,
+		FirstName:    row.FirstName,
+		LastName:     row.LastName,
 		PasswordHash: row.PasswordHash,
 		Status:       row.Status,
 	}, nil
+}
+
+// UpdatePassword implements domain.UserRepository.
+func (r *UserRepository) UpdatePassword(ctx context.Context, id int64, passwordHash string) error {
+	n, err := r.db.Queries(ctx).UpdateUserPassword(ctx, sqlc.UpdateUserPasswordParams{ID: id, PasswordHash: passwordHash})
+	if err != nil {
+		return err
+	}
+
+	if n == 0 {
+		return domain.ErrUserNotFound
+	}
+
+	return nil
 }
 
 // List implements domain.UserRepository; it also returns the total count for pagination.

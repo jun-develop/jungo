@@ -66,6 +66,12 @@ func (s *UserService) GetCredentialsByEmail(ctx context.Context, email string) (
 	return s.repo.GetCredentialsByEmail(ctx, domain.NormalizeEmail(email))
 }
 
+// SetPasswordHash replaces a user's password hash without an authorization check; callers (the
+// auth feature's password reset) must have verified the request themselves.
+func (s *UserService) SetPasswordHash(ctx context.Context, id int64, passwordHash string) error {
+	return s.repo.UpdatePassword(ctx, id, passwordHash)
+}
+
 // GetUsers returns a paginated list of users.
 func (s *UserService) GetUsers(ctx context.Context, filter domain.UserListFilter) ([]*domain.User, int64, error) {
 	return s.repo.List(ctx, filter)

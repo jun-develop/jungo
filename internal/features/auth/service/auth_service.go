@@ -11,6 +11,7 @@ import (
 	"go.uber.org/fx"
 	"go.uber.org/zap"
 
+	"github.com/jun-develop/junkit/mailer"
 	"github.com/jun-develop/junkit/recaptcha"
 	"github.com/jun-develop/junkit/security"
 	"github.com/jun-develop/junkit/tracer"
@@ -41,6 +42,7 @@ type Params struct {
 	Hasher    security.PasswordHasher
 	Logger    *zap.Logger
 	Recaptcha recaptcha.Verifier `optional:"true"`
+	Mailer    mailer.Sender      `optional:"true"`
 }
 
 // AuthService implements domain.AuthService.
@@ -54,6 +56,10 @@ type AuthService struct {
 	hasher    security.PasswordHasher
 	logger    *zap.Logger
 	recaptcha recaptcha.Verifier
+	mailer    mailer.Sender
+	mailLog   bool
+	dev       bool
+	appName   string // MAIL_FROM display name, shown in emails
 	now       func() time.Time
 }
 
@@ -69,6 +75,10 @@ func NewAuthService(p Params) *AuthService {
 		hasher:    p.Hasher,
 		logger:    p.Logger,
 		recaptcha: p.Recaptcha,
+		mailer:    p.Mailer,
+		mailLog:   p.Config.Mail.Driver == "" || p.Config.Mail.Driver == string(mailer.DriverLog),
+		dev:       p.Config.IsDevelopment(),
+		appName:   senderName(p.Config.Mail.From),
 		now:       time.Now,
 	}
 }

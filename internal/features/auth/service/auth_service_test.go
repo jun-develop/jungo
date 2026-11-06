@@ -60,7 +60,16 @@ type fakeRepository struct {
 	now    func() time.Time
 	users  map[int64]*fakeUser
 	tokens []*fakeToken
+	resets []*fakeReset
 	nextID int64
+}
+
+// fakeReset is a row of the fake password_reset_tokens table.
+type fakeReset struct {
+	userID    int64
+	hash      string
+	expiresAt time.Time
+	used      bool
 }
 
 func newFakeRepository(now func() time.Time) *fakeRepository {
@@ -79,11 +88,53 @@ func (r *fakeRepository) GetCredentialsByEmail(_ context.Context, email string) 
 	defer r.mu.Unlock()
 	for _, u := range r.users {
 		if u.email == email && !u.deleted {
-			return &domain.Credentials{UserID: u.id, UserUUID: u.uuid, PasswordHash: u.passwordHash, Active: u.active}, nil
+			return &domain.Credentials{UserID: u.id, UserUUID: u.uuid, Email: u.email, FirstName: "Jane", LastName: "Doe", PasswordHash: u.passwordHash, Active: u.active}, nil
 		}
 	}
 
 	return nil, domain.ErrUserNotFound
+}
+
+// SetPasswordHash implements domain.UserProvider.
+func (r *fakeRepository) SetPasswordHash(_ context.Context, userID int64, passwordHash string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	u, ok := r.users[userID]
+	if !ok || u.deleted {
+		return domain.ErrUserNotFound
+	}
+
+	u.passwordHash = passwordHash
+
+	return nil
+}
+
+func (r *fakeRepository) CreatePasswordResetToken(_ context.Context, userID int64, hash string, expiresAt time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, rt := range r.resets {
+		if rt.userID == userID {
+			rt.used = true
+		}
+	}
+
+	r.resets = append(r.resets, &fakeReset{userID: userID, hash: hash, expiresAt: expiresAt})
+
+	return nil
+}
+
+func (r *fakeRepository) ConsumePasswordResetToken(_ context.Context, hash string) (*domain.PasswordResetOwner, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, rt := range r.resets {
+		u := r.users[rt.userID]
+		if rt.hash == hash && !rt.used && r.now().Before(rt.expiresAt) && u.active && !u.deleted {
+			rt.used = true
+			return &domain.PasswordResetOwner{UserID: u.id, UserUUID: u.uuid}, nil
+		}
+	}
+
+	return nil, domain.ErrInvalidResetToken
 }
 
 func (r *fakeRepository) CreateLoginSession(_ context.Context, p domain.NewSessionParams) (*domain.LoginSessionResult, error) {
