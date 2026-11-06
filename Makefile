@@ -6,7 +6,7 @@ COMPOSE_PROD = docker compose -f deploy/docker-compose.yaml --env-file .env
 PROFILE = $(if $(WITH),--profile $(WITH),)
 
 # One DSN + directory pair per database; a second database adds its own pair and targets.
-PRIMARY_DSN = "postgres://$(DB_USER):$(DB_PASSWORD)@localhost:$(DB_HOST_PORT)/$(DB_NAME)?sslmode=$(DB_SSLMODE)"
+PRIMARY_DSN = "postgres://$(DB_USER):$(DB_PASSWORD)@localhost:$(DB_PORT)/$(DB_NAME)?sslmode=$(DB_SSLMODE)"
 PRIMARY_DIR = internal/database/primary
 
 

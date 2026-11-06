@@ -30,6 +30,7 @@ services:
       POSTGRES_USER: ${DB_USER:-postgres}
       POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
       POSTGRES_DB: ${DB_NAME:-jungo}
+      PGPORT: ${DB_PORT:-5432}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:

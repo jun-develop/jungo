@@ -143,8 +143,8 @@ DB_USER=$(prompt "Database user" "postgres")
 DB_PASSWORD=$(prompt_secret "Database password" "postgres")
 API_SERVER_PORT=$(prompt_port "App port (host)" "8080")
 while true; do
-	DB_HOST_PORT=$(prompt_port "Database port (host)" "5432")
-	if [ "$DB_HOST_PORT" = "$API_SERVER_PORT" ]; then
+	DB_PORT=$(prompt_port "Database port (host)" "5432")
+	if [ "$DB_PORT" = "$API_SERVER_PORT" ]; then
 		echo "${RED}  -> Must differ from the app port ($API_SERVER_PORT).${RESET}" >&2
 		continue
 	fi
@@ -186,7 +186,7 @@ set_env "DB_NAME" "$DB_NAME"
 set_env "DB_USER" "$DB_USER"
 set_env "DB_PASSWORD" "$DB_PASSWORD"
 set_env "API_SERVER_PORT" "$API_SERVER_PORT"
-set_env "DB_HOST_PORT" "$DB_HOST_PORT"
+set_env "DB_PORT" "$DB_PORT"
 set_env "AUTH_TOKEN_HMAC_SECRET" "$AUTH_TOKEN_HMAC_SECRET"
 set_env "AUTH_TOKEN_ENCRYPTION_KEY" "$AUTH_TOKEN_ENCRYPTION_KEY"
 set_env "AUTH_INTERNAL_SECRET" "$AUTH_INTERNAL_SECRET"
@@ -306,7 +306,7 @@ echo "  APP_NAME=$APP_NAME"
 echo "  DB_NAME=$DB_NAME"
 echo "  DB_USER=$DB_USER"
 echo "  API_SERVER_PORT=$API_SERVER_PORT"
-echo "  DB_HOST_PORT=$DB_HOST_PORT"
+echo "  DB_PORT=$DB_PORT"
 echo "  AUTH_TOKEN_* / AUTH_INTERNAL_SECRET generated (see .env)"
 echo "  TRACER_DEBUG_VALUE=$TRACER_DEBUG_VALUE"
 check_tool() {
