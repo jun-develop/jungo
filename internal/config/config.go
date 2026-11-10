@@ -50,7 +50,6 @@ type LoggerConfig struct {
 
 	LimiterLevel string `env:"LOG_LIMITER_LEVEL" envDefault:"info"`
 
-	// Output forces logger.OutputConsole or logger.OutputFile; set by the console, not from env.
 	Output string
 }
 
