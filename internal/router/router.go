@@ -82,7 +82,7 @@ func RegisterAll(p Params) error {
 	p.Router.GET("/health", func(ctx *gin.Context) {
 		p.Responder.Send(ctx, http.StatusOK, "app_running")
 	})
-	p.Router.Static("/uploads", p.Config.Storage.BaseDir)
+	p.Router.Static("/uploads", p.Config.StoragePath("uploads"))
 
 	api := p.Router.Group("/api")
 	versionGroups := make(map[string]*gin.RouterGroup)

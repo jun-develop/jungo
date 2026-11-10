@@ -213,10 +213,10 @@ func provideLoggers(cfg *config.Config) []fx.Option {
 	}
 
 	defs := []logger.Definition{
-		{Name: "app", Level: cfg.Logger.AppLevel, Filename: cfg.Logger.AppFilename},
-		{Name: "http", Level: cfg.Logger.HTTPLevel, Filename: cfg.Logger.HTTPFilename},
-		{Name: "sql", Level: cfg.Logger.SQLLevel, Filename: cfg.Logger.SQLFilename},
-		{Name: "limiter", Level: cfg.Logger.LimiterLevel, Filename: cfg.Logger.LimiterFilename},
+		{Name: "app", Level: cfg.Logger.AppLevel, Filename: cfg.StoragePath("logs", "app.log")},
+		{Name: "http", Level: cfg.Logger.HTTPLevel, Filename: cfg.StoragePath("logs", "http.log")},
+		{Name: "sql", Level: cfg.Logger.SQLLevel, Filename: cfg.StoragePath("logs", "sql.log")},
+		{Name: "limiter", Level: cfg.Logger.LimiterLevel, Filename: cfg.StoragePath("logs", "limiter.log")},
 	}
 
 	return logger.ProvideNamed(defs, shared)
@@ -229,6 +229,7 @@ func provideResponseOptions(cfg *config.Config) response.Options {
 
 // provideValidationOptions builds validation.Options from cfg.
 func provideValidationOptions(cfg *config.Config) validation.Options {
+	validation.DefaultBlocklistPath = cfg.StoragePath("bootstrap", "email_blocklist.conf")
 	return validation.Options{Language: cfg.Language}
 }
 
@@ -276,7 +277,7 @@ func provideCacheOptions(cfg *config.Config) cache.Options {
 
 // provideStorageOptions builds storage.Options from cfg.Storage.
 func provideStorageOptions(cfg *config.Config) storage.Options {
-	return storage.Options{BaseDir: cfg.Storage.BaseDir, BaseURL: cfg.Storage.BaseURL}
+	return storage.Options{BaseDir: cfg.StoragePath("uploads"), BaseURL: cfg.Storage.BaseURL}
 }
 
 // provideTelegramOptions builds telegram.Options from cfg.Telegram.

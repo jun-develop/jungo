@@ -182,6 +182,7 @@ Run `make help` for the full list.
 | `make migrate-refresh` | Drop everything and re-run all migrations (**destroys data**) |
 | `make migrate-create NAME=add_x` | Scaffold a new migration |
 | `make db-seed` | Apply `internal/database/primary/seeders/*.sql` (demo data, never in production) |
+| `make export-db` | Dump the running stack's database (dev or prod) to `./<DB_NAME>_<timestamp>.sql` (gitignored) |
 | `make sqlc` | Regenerate `internal/database/primary/sqlc` from `internal/database/primary/queries` |
 
 **Code generation & tooling**
@@ -218,7 +219,8 @@ All configuration is environment variables in `.env` (created by `make app-init`
 | `AUTH_*` | Login, tokens and brute-force limits — see [Authentication › Configuration](#authentication-configuration) |
 | `TRACER_DEBUG_KEY` / `TRACER_DEBUG_VALUE` | Query-param name/value that, with the `X-Internal-Secret: <AUTH_INTERNAL_SECRET>` header, unlocks the [debug dashboard](#7-live-debug-dashboard) |
 | `CACHE_REDIS_ENABLE` | `false` (default): no cache, sessions and permissions are read from the database on every request; `true`: Redis (start it with `WITH=cache`), shared by every instance |
-| `STORAGE_BASE_DIR` / `STORAGE_BASE_URL` | Where uploaded avatars are stored and served from |
+| `STORAGE_DIR` | The one folder the app writes to (default `./storage`): `logs/`, `uploads/`, `bootstrap/`. New files on disk go through `cfg.StoragePath(...)`, never a hard-coded path |
+| `STORAGE_BASE_URL` | Public URL of uploads (empty = `http://localhost:<port>/uploads`) |
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | Ops alerts for panics/rate-limit breaches; empty = safe no-op |
 | `MAIL_*` | Outgoing email via junkit `mailer`. `MAIL_DRIVER=log` (default) only logs emails; `smtp` works with any provider (Brevo, Resend, SES, ...), `brevo` uses the Brevo API. Changing provider is config only |
 | `RECAPTCHA_MOCK` | Verifier always succeeds when true; honored in development only |

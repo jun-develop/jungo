@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -41,17 +42,13 @@ type LoggerConfig struct {
 	MaxAge     int  `env:"LOG_MAX_AGE" envDefault:"7"`
 	Compress   bool `env:"LOG_COMPRESS" envDefault:"true"`
 
-	AppLevel    string `env:"LOG_APP_LEVEL" envDefault:"info"`
-	AppFilename string `env:"LOG_APP_FILENAME" envDefault:"storage/logs/app.log"`
+	AppLevel string `env:"LOG_APP_LEVEL" envDefault:"info"`
 
-	HTTPLevel    string `env:"LOG_HTTP_LEVEL" envDefault:"info"`
-	HTTPFilename string `env:"LOG_HTTP_FILENAME" envDefault:"storage/logs/http.log"`
+	HTTPLevel string `env:"LOG_HTTP_LEVEL" envDefault:"info"`
 
-	SQLLevel    string `env:"LOG_SQL_LEVEL" envDefault:"info"`
-	SQLFilename string `env:"LOG_SQL_FILENAME" envDefault:"storage/logs/sql.log"`
+	SQLLevel string `env:"LOG_SQL_LEVEL" envDefault:"info"`
 
-	LimiterLevel    string `env:"LOG_LIMITER_LEVEL" envDefault:"info"`
-	LimiterFilename string `env:"LOG_LIMITER_FILENAME" envDefault:"storage/logs/limiter.log"`
+	LimiterLevel string `env:"LOG_LIMITER_LEVEL" envDefault:"info"`
 
 	// Output forces logger.OutputConsole or logger.OutputFile; set by the console, not from env.
 	Output string
@@ -91,10 +88,9 @@ type RedisConfig struct {
 	DB       int    `env:"REDIS_DB" envDefault:"0"`
 }
 
-// StorageConfig configures file upload storage paths and URLs. An empty BaseURL follows
-// API_SERVER_PORT (http://localhost:<port>/uploads).
+// StorageConfig configures the public URL of uploads (files live in StoragePath("uploads")).
+// An empty BaseURL follows API_SERVER_PORT (http://localhost:<port>/uploads).
 type StorageConfig struct {
-	BaseDir string `env:"STORAGE_BASE_DIR" envDefault:"./storage/uploads"`
 	BaseURL string `env:"STORAGE_BASE_URL"`
 }
 
@@ -162,6 +158,8 @@ type Config struct {
 	Language    string `env:"API_LANGUAGE" envDefault:"en"`
 	Timezone    string `env:"API_TIMEZONE" envDefault:"UTC"`
 
+	StorageDir string `env:"STORAGE_DIR" envDefault:"./storage"`
+
 	TracerDebugKey   string `env:"TRACER_DEBUG_KEY"`
 	TracerDebugValue string `env:"TRACER_DEBUG_VALUE"`
 
@@ -177,6 +175,12 @@ type Config struct {
 	Mail      MailConfig
 	Recaptcha RecaptchaConfig
 	Auth      AuthConfig
+}
+
+// StoragePath returns a path inside StorageDir, e.g. StoragePath("logs", "app.log").
+// Anything new the app writes to disk goes through it, so STORAGE_DIR stays the only setting.
+func (c *Config) StoragePath(elem ...string) string {
+	return filepath.Join(append([]string{c.StorageDir}, elem...)...)
 }
 
 // IsDevelopment reports whether the app runs in the development environment.
