@@ -194,6 +194,7 @@ Run `make help` for the full list.
 | `make command NAME=... SIGNATURE=...` | Generate a new CLI command — see [14](#14-adding-a-new-console-command) |
 | `make console CMD="user:list"` | Run a CLI command inside the running stack — see [8](#8-console-commands) |
 | `make test` / `make vet` / `make fmt` / `make tidy` | Standard Go checks |
+| `make junkit-update [VERSION=v0.0.8]` | Upgrade junkit to its latest release (or a given tag), then `go mod tidy` |
 
 ### Updating `junkit`
 

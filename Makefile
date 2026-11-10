@@ -164,7 +164,7 @@ console: ## Run a CLI command inside whichever app stack is running, dev or prod
 # =============================================================================
 # Go
 # =============================================================================
-.PHONY: build test vet fmt tidy
+.PHONY: build test vet fmt tidy junkit-update
 build: ## Compile the API binary
 	$(Q)go build -o bin/api ./cmd/api
 
@@ -179,3 +179,6 @@ fmt: ## Format all Go source
 
 tidy: ## Tidy go.mod/go.sum
 	$(Q)go mod tidy
+
+junkit-update: ## Upgrade junkit to its latest release: make junkit-update [VERSION=v0.0.8]
+	$(Q)go get github.com/jun-develop/junkit@$(or $(VERSION),latest) && go mod tidy
