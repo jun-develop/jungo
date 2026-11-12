@@ -164,7 +164,7 @@ console: ## Run a CLI command inside whichever app stack is running, dev or prod
 # =============================================================================
 # Go
 # =============================================================================
-.PHONY: build test vet fmt tidy junkit-update
+.PHONY: build test vet vuln fmt tidy junkit-update
 build: ## Compile the API binary
 	$(Q)go build -o bin/api ./cmd/api
 
@@ -173,6 +173,9 @@ test: ## Run all tests
 
 vet: ## Run go vet
 	$(Q)go vet ./...
+
+vuln: ## Scan dependencies and the Go toolchain for known vulnerabilities your code actually calls
+	$(Q)go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
 fmt: ## Format all Go source
 	$(Q)gofmt -w .
