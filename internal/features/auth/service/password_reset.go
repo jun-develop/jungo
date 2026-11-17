@@ -13,16 +13,18 @@ import (
 	texttemplate "text/template"
 	"time"
 
+	"github.com/google/uuid"
 	"go.uber.org/zap"
 
 	"github.com/jun-develop/junkit/mailer"
 	"github.com/jun-develop/junkit/security"
 	"github.com/jun-develop/junkit/tracer"
 
+	"jungo/internal/config"
 	"jungo/internal/features/auth/domain"
 )
 
-// mailTimeout bounds sending one password reset email.
+// mailTimeout bounds storing the token and sending one password reset email.
 const mailTimeout = 30 * time.Second
 
 // maxPasswordBytes is bcrypt's input limit, checked before a reset token is spent.
@@ -45,14 +47,15 @@ type resetEmailData struct {
 	Minutes int
 }
 
-// ForgotPassword emails a single-use reset link when email belongs to an active user. Unknown and
-// inactive emails also return nil, and the email is sent in the background, so neither the response
-// nor its timing reveals which emails are registered.
+// ForgotPassword emails a single-use reset link when email belongs to an active user. Every email,
+// registered or not, gets the same answer after the same single lookup: the token is stored and the
+// email rendered and sent in the background, so neither the response nor its timing reveals which
+// emails are registered.
 //
-// Flow: check email setup -> throttle IP + email -> look up user -> store token hash -> send email
+// Flow: check setup -> throttle IP + email -> look up user -> [background: store token hash -> send email]
 func (s *AuthService) ForgotPassword(ctx context.Context, email string, meta domain.Metadata) error {
-	if err := s.passwordResetReady(); err != nil {
-		return err
+	if s.resetErr != nil {
+		return domain.ErrPasswordResetUnavailable
 	}
 
 	if err := s.guard.AttemptPasswordReset(ctx, meta.IPAddress, email); err != nil {
@@ -68,60 +71,51 @@ func (s *AuthService) ForgotPassword(ctx context.Context, email string, meta dom
 		return err
 	}
 
-	if !creds.Active {
-		return nil
+	if creds.Active {
+		s.background.Go(func() {
+			bgCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), mailTimeout)
+			defer cancel()
+
+			if err := s.sendResetLink(bgCtx, creds); err != nil {
+				s.logger.Error("auth: send password reset email failed", zap.String("user_uuid", creds.UserUUID.String()), zap.Error(err))
+			}
+		})
 	}
-
-	link, err := url.Parse(s.cfg.PasswordResetURL)
-	if err != nil {
-		return fmt.Errorf("AUTH_PASSWORD_RESET_URL: %w", err)
-	}
-
-	token := security.GenerateToken()
-	if err := s.repo.CreatePasswordResetToken(ctx, creds.UserID, security.HashToken(token), s.now().Add(s.cfg.PasswordResetTTL)); err != nil {
-		return err
-	}
-
-	q := link.Query()
-	q.Set("token", token)
-	link.RawQuery = q.Encode()
-
-	msg, err := resetEmail(creds, s.appName, link.String(), s.cfg.PasswordResetTTL)
-	if err != nil {
-		return err
-	}
-
-	s.sendResetEmail(ctx, msg)
 
 	return nil
 }
 
-// ResetPassword sets a new password with a token from ForgotPassword, then ends every session of
-// the user. The token works once, whether or not the rest succeeds.
+// ResetPassword sets a new password with a token from ForgotPassword and ends every session of the
+// user, in one transaction: either all of it happens or none, and the token can be used again.
 //
-// Flow: check length -> consume token -> hash password -> save hash -> revoke every session
+// Flow: check length -> [consume token -> hash password -> save hash -> revoke every session] (tx) -> drop cached sessions
 func (s *AuthService) ResetPassword(ctx context.Context, token, password string) error {
 	if len(password) > maxPasswordBytes {
 		return domain.ErrPasswordTooLong
 	}
 
-	owner, err := s.repo.ConsumePasswordResetToken(ctx, security.HashToken(token))
-	if err != nil {
-		return err
-	}
+	var families []uuid.UUID
+	err := s.repo.WithTransaction(ctx, func(ctx context.Context) error {
+		owner, err := s.repo.ConsumePasswordResetToken(ctx, security.HashToken(token))
+		if err != nil {
+			return err
+		}
 
-	stop := tracer.Span(ctx, "Bcrypt Hashing")
-	hash, err := s.hasher.Hash(password)
-	stop()
-	if err != nil {
-		return err
-	}
+		stop := tracer.Span(ctx, "Bcrypt Hashing")
+		hash, err := s.hasher.Hash(ctx, password)
+		stop()
+		if err != nil {
+			return err
+		}
 
-	if err := s.users.SetPasswordHash(ctx, owner.UserID, hash); err != nil {
-		return err
-	}
+		if err := s.users.SetPasswordHash(ctx, owner.UserID, hash); err != nil {
+			return err
+		}
 
-	families, err := s.repo.RevokeAllForUser(ctx, owner.UserUUID, domain.RevokedReasonPasswordReset)
+		families, err = s.repo.RevokeAllForUser(ctx, owner.UserUUID, domain.RevokedReasonPasswordReset)
+
+		return err
+	})
 	if err != nil {
 		return err
 	}
@@ -131,39 +125,53 @@ func (s *AuthService) ResetPassword(ctx context.Context, token, password string)
 	return nil
 }
 
-// passwordResetReady returns ErrPasswordResetUnavailable, logging what the developer must
-// configure, when reset emails cannot reach users. In development MAIL_DRIVER=log is allowed: the
-// email, link included, is written to the log.
-func (s *AuthService) passwordResetReady() error {
-	switch {
-	case s.cfg.PasswordResetURL == "":
-		s.logger.Error("auth: password reset is disabled: set AUTH_PASSWORD_RESET_URL to the frontend page that reads ?token= (see .env.example)")
-	case s.mailer == nil:
-		s.logger.Error("auth: password reset is disabled: no mailer.Sender is wired (add mailer.Module)")
-	case s.mailLog && !s.dev:
-		s.logger.Error("auth: password reset needs email: set MAIL_DRIVER=smtp or brevo and the MAIL_* settings (see .env.example); MAIL_DRIVER=log only writes emails to the log")
-	default:
-		return nil
+// sendResetLink stores a new reset token for creds and emails them the link.
+func (s *AuthService) sendResetLink(ctx context.Context, creds *domain.Credentials) error {
+	token := security.GenerateToken()
+	if err := s.repo.CreatePasswordResetToken(ctx, creds.UserID, security.HashToken(token), s.now().Add(s.cfg.PasswordResetTTL)); err != nil {
+		return err
 	}
 
-	return domain.ErrPasswordResetUnavailable
+	link := *s.resetURL
+	q := link.Query()
+	q.Set("token", token)
+	link.RawQuery = q.Encode()
+
+	msg, err := resetEmail(creds, s.senderName, link.String(), s.cfg.PasswordResetTTL)
+	if err != nil {
+		return err
+	}
+
+	if err := s.mailer.Send(ctx, msg); err != nil {
+		return err
+	}
+
+	if s.mailLog {
+		s.logger.Warn("auth: password reset email was NOT sent, only logged above (MAIL_DRIVER=log); set MAIL_DRIVER=smtp or brevo to deliver it")
+	}
+
+	return nil
 }
 
-// sendResetEmail sends msg in the background; a failure is logged, never returned to the client.
-func (s *AuthService) sendResetEmail(ctx context.Context, msg mailer.Message) {
-	go func() {
-		sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), mailTimeout)
-		defer cancel()
+// passwordResetSetup parses AUTH_PASSWORD_RESET_URL and returns why password reset cannot reach
+// users, or nil. In development MAIL_DRIVER=log is allowed: the email, link included, is written
+// to the log.
+func passwordResetSetup(cfg *config.Config, hasMailer, mailLog bool) (*url.URL, error) {
+	switch {
+	case cfg.Auth.PasswordResetURL == "":
+		return nil, errors.New("set AUTH_PASSWORD_RESET_URL to the frontend page that reads ?token= (see .env.example)")
+	case !hasMailer:
+		return nil, errors.New("no mailer.Sender is wired (add mailer.Module)")
+	case mailLog && !cfg.IsDevelopment():
+		return nil, errors.New("set MAIL_DRIVER=smtp or brevo and the MAIL_* settings (see .env.example); MAIL_DRIVER=log only writes emails to the log")
+	}
 
-		if err := s.mailer.Send(sendCtx, msg); err != nil {
-			s.logger.Error("auth: send password reset email failed", zap.Error(err))
-			return
-		}
+	link, err := url.Parse(cfg.Auth.PasswordResetURL)
+	if err != nil {
+		return nil, fmt.Errorf("AUTH_PASSWORD_RESET_URL: %w", err)
+	}
 
-		if s.mailLog {
-			s.logger.Warn("auth: password reset email was NOT sent, only logged above (MAIL_DRIVER=log); set MAIL_DRIVER=smtp or brevo to deliver it")
-		}
-	}()
+	return link, nil
 }
 
 // resetEmail renders the password reset email from the embedded templates.

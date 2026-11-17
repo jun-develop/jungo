@@ -2,10 +2,10 @@
 //
 // Usage:
 //
-//	make console CMD="user:list"
 //	make console CMD="health:check"
-//	make console CMD="user:list --verbose"   # also print app logs and executed SQL
-//	make console CMD="user:list --debug"     # print every log, Fx events included
+//	make console CMD="db:migrate"
+//	make console CMD="health:check --verbose"   (also print app logs and executed SQL)
+//	make console CMD="health:check --debug"     (print every log, Fx events included)
 package main
 
 import "jungo/internal/app"

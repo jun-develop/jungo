@@ -3,7 +3,6 @@ package repository
 import (
 	"context"
 	"net/netip"
-	"slices"
 	"time"
 
 	"github.com/google/uuid"
@@ -13,8 +12,11 @@ import (
 	"jungo/internal/database/primary"
 	"jungo/internal/database/primary/sqlc"
 	"jungo/internal/features/auth/domain"
-	userdomain "jungo/internal/features/user/domain"
 )
+
+// cleanupBatchSize caps the rows one CleanupTokens statement deletes, so a cleanup never holds a
+// long transaction on auth_tokens, which every request reads.
+const cleanupBatchSize = 5000
 
 // AuthRepository implements domain.AuthRepository.
 type AuthRepository struct {
@@ -24,6 +26,11 @@ type AuthRepository struct {
 // NewAuthRepository creates an AuthRepository backed by db.
 func NewAuthRepository(db *primary.DB) *AuthRepository {
 	return &AuthRepository{db: db}
+}
+
+// WithTransaction implements domain.AuthRepository.
+func (r *AuthRepository) WithTransaction(ctx context.Context, fn func(ctx context.Context) error) error {
+	return r.db.WithTransaction(ctx, fn)
 }
 
 // CreateLoginSession implements domain.AuthRepository; it rotates the device's session
@@ -41,7 +48,7 @@ func (r *AuthRepository) CreateLoginSession(ctx context.Context, params domain.N
 		NewFamilyUUID:    params.FamilyUUID,
 	})
 	if err != nil {
-		return nil, err
+		return nil, wrap("create login session", err)
 	}
 
 	return &domain.LoginSessionResult{FamilyUUID: row.FamilyUUID, StaleFamilyUUID: row.OldFamilyUUID}, nil
@@ -61,7 +68,7 @@ func (r *AuthRepository) RefreshSession(ctx context.Context, hash string, params
 		RefreshExpiresAt: params.RefreshExpiresAt,
 	})
 	if err != nil {
-		return nil, err
+		return nil, wrap("refresh session", err)
 	}
 
 	return &domain.RefreshResult{Status: row.Status, FamilyUUID: row.FamilyUUID, UserUUID: row.UserUUID}, nil
@@ -71,31 +78,20 @@ func (r *AuthRepository) RefreshSession(ctx context.Context, hash string, params
 func (r *AuthRepository) GetSessionByHash(ctx context.Context, hash string) (*domain.Session, error) {
 	row, err := r.db.Queries(ctx).GetSessionByHash(ctx, hash)
 	if err != nil {
-		return nil, database.MatchNotFound(err, domain.ErrTokenNotFound)
+		return nil, wrap("get session", database.MatchNotFound(err, domain.ErrTokenNotFound))
 	}
 
 	return mapSession(row), nil
 }
 
-// GetTokenByHash implements domain.AuthRepository.
-func (r *AuthRepository) GetTokenByHash(ctx context.Context, hash string) (*domain.StoredToken, error) {
-	row, err := r.db.Queries(ctx).GetTokenByHash(ctx, hash)
+// GetTokenTypeByHash implements domain.AuthRepository.
+func (r *AuthRepository) GetTokenTypeByHash(ctx context.Context, hash string) (domain.TokenType, error) {
+	t, err := r.db.Queries(ctx).GetTokenTypeByHash(ctx, hash)
 	if err != nil {
-		return nil, database.MatchNotFound(err, domain.ErrTokenNotFound)
+		return 0, wrap("get token type", database.MatchNotFound(err, domain.ErrTokenNotFound))
 	}
 
-	return &domain.StoredToken{
-		UUID:          row.UUID,
-		UserID:        row.UserID,
-		UserUUID:      row.UserUUID,
-		UserActive:    row.UserStatus == userdomain.UserStatusActive,
-		FamilyUUID:    row.FamilyUUID,
-		Type:          domain.TokenType(row.Type),
-		DeviceID:      row.DeviceID,
-		ExpiresAt:     row.ExpiresAt,
-		RevokedAt:     row.RevokedAt,
-		RevokedReason: row.RevokedReason,
-	}, nil
+	return domain.TokenType(t), nil
 }
 
 // RevokeFamily implements domain.AuthRepository.
@@ -104,7 +100,11 @@ func (r *AuthRepository) RevokeFamily(ctx context.Context, familyUUID uuid.UUID,
 		FamilyUUID: familyUUID,
 		Reason:     &reason,
 	})
-	return err
+	if err != nil {
+		return wrap("revoke family", err)
+	}
+
+	return nil
 }
 
 // RevokeFamilyByHash implements domain.AuthRepository; it revokes the session the token belongs to
@@ -115,7 +115,7 @@ func (r *AuthRepository) RevokeFamilyByHash(ctx context.Context, hash, reason st
 		Reason: &reason,
 	})
 	if err != nil {
-		return uuid.Nil, database.MatchNotFound(err, domain.ErrTokenNotFound)
+		return uuid.Nil, wrap("revoke family by hash", database.MatchNotFound(err, domain.ErrTokenNotFound))
 	}
 
 	return family, nil
@@ -129,32 +129,30 @@ func (r *AuthRepository) RevokeAllByHash(ctx context.Context, hash, reason strin
 		Reason: &reason,
 	})
 	if err != nil {
-		return nil, database.MatchNotFound(err, domain.ErrTokenNotFound)
+		return nil, wrap("revoke all by hash", database.MatchNotFound(err, domain.ErrTokenNotFound))
 	}
 
 	return families, nil
 }
 
-// RevokeAllForUser implements domain.AuthRepository; it returns the affected families.
+// RevokeAllForUser implements domain.AuthRepository; it returns each affected family once.
 func (r *AuthRepository) RevokeAllForUser(ctx context.Context, userUUID uuid.UUID, reason string) ([]uuid.UUID, error) {
 	families, err := r.db.Queries(ctx).RevokeAllForUser(ctx, sqlc.RevokeAllForUserParams{
 		UserUUID: userUUID,
 		Reason:   &reason,
 	})
 	if err != nil {
-		return nil, err
+		return nil, wrap("revoke all for user", err)
 	}
 
-	slices.SortFunc(families, func(a, b uuid.UUID) int { return slices.Compare(a[:], b[:]) })
-
-	return slices.Compact(families), nil
+	return families, nil
 }
 
 // ListActiveSessions implements domain.AuthRepository.
 func (r *AuthRepository) ListActiveSessions(ctx context.Context, userID int64) ([]*domain.SessionSummary, error) {
 	rows, err := r.db.Queries(ctx).ListActiveSessions(ctx, userID)
 	if err != nil {
-		return nil, err
+		return nil, wrap("list active sessions", err)
 	}
 
 	items := make([]*domain.SessionSummary, len(rows))
@@ -165,7 +163,6 @@ func (r *AuthRepository) ListActiveSessions(ctx context.Context, userID int64) (
 			UserAgent:  row.UserAgent,
 			DeviceID:   row.DeviceID,
 			CreatedAt:  row.CreatedAt,
-			UpdatedAt:  row.UpdatedAt,
 			ExpiresAt:  row.ExpiresAt,
 		}
 	}
@@ -173,26 +170,44 @@ func (r *AuthRepository) ListActiveSessions(ctx context.Context, userID int64) (
 	return items, nil
 }
 
-// CleanupTokens implements domain.AuthRepository.
+// CleanupTokens implements domain.AuthRepository; it deletes in batches of cleanupBatchSize.
 func (r *AuthRepository) CleanupTokens(ctx context.Context, before time.Time) (int64, error) {
-	tokens, err := r.db.Queries(ctx).CleanupTokens(ctx, before)
-	if err != nil {
-		return 0, err
+	queries := r.db.Queries(ctx)
+
+	var deleted int64
+	for {
+		n, err := queries.CleanupTokens(ctx, sqlc.CleanupTokensParams{Before: before, BatchSize: cleanupBatchSize})
+		if err != nil {
+			return deleted, wrap("cleanup tokens", err)
+		}
+
+		deleted += n
+		if n < cleanupBatchSize {
+			break
+		}
 	}
 
-	resets, err := r.db.Queries(ctx).CleanupPasswordResetTokens(ctx, before)
+	resets, err := queries.CleanupPasswordResetTokens(ctx, before)
+	if err != nil {
+		return deleted, wrap("cleanup password reset tokens", err)
+	}
 
-	return tokens + resets, err
+	return deleted + resets, nil
 }
 
 // CreatePasswordResetToken implements domain.AuthRepository; it supersedes the user's earlier
 // unused tokens.
 func (r *AuthRepository) CreatePasswordResetToken(ctx context.Context, userID int64, hash string, expiresAt time.Time) error {
-	return r.db.Queries(ctx).CreatePasswordResetToken(ctx, sqlc.CreatePasswordResetTokenParams{
+	err := r.db.Queries(ctx).CreatePasswordResetToken(ctx, sqlc.CreatePasswordResetTokenParams{
 		UserID:    userID,
 		Hash:      hash,
 		ExpiresAt: expiresAt,
 	})
+	if err != nil {
+		return wrap("create password reset token", err)
+	}
+
+	return nil
 }
 
 // ConsumePasswordResetToken implements domain.AuthRepository; it returns ErrInvalidResetToken for
@@ -200,7 +215,7 @@ func (r *AuthRepository) CreatePasswordResetToken(ctx context.Context, userID in
 func (r *AuthRepository) ConsumePasswordResetToken(ctx context.Context, hash string) (*domain.PasswordResetOwner, error) {
 	row, err := r.db.Queries(ctx).ConsumePasswordResetToken(ctx, hash)
 	if err != nil {
-		return nil, database.MatchNotFound(err, domain.ErrInvalidResetToken)
+		return nil, wrap("consume password reset token", database.MatchNotFound(err, domain.ErrInvalidResetToken))
 	}
 
 	return &domain.PasswordResetOwner{UserID: row.UserID, UserUUID: row.UserUUID}, nil
@@ -215,7 +230,7 @@ func mapSession(row sqlc.GetSessionByHashRow) *domain.Session {
 		FirstName:  row.FirstName,
 		LastName:   row.LastName,
 		AvatarURL:  row.AvatarURL,
-		UserActive: row.UserStatus == userdomain.UserStatusActive,
+		UserActive: row.UserActive,
 		FamilyUUID: row.FamilyUUID,
 		IPAddress:  formatIP(row.IPAddress),
 		UserAgent:  row.UserAgent,
@@ -253,6 +268,9 @@ func parseIP(ip *string) *netip.Addr {
 
 	return &addr
 }
+
+// wrap adds the failed operation to err; domain errors stay matchable with errors.Is/As.
+var wrap = database.Wrapper("auth repository")
 
 // formatIP converts an INET column value back to a string.
 func formatIP(addr *netip.Addr) *string {

@@ -6,6 +6,8 @@ COMPOSE_PROD = docker compose -f deploy/docker-compose.yaml --env-file .env
 PROFILE = $(if $(WITH),--profile $(WITH),)
 
 # One DSN + directory pair per database; a second database adds its own pair and targets.
+# shortcut: DB_USER/DB_PASSWORD go into a URL unescaped, so they must be URL-safe here (the app
+# itself quotes them); percent-encode them in .env if a target fails to connect.
 PRIMARY_DSN = "postgres://$(DB_USER):$(DB_PASSWORD)@localhost:$(DB_PORT)/$(DB_NAME)?sslmode=$(DB_SSLMODE)"
 PRIMARY_DIR = internal/database/primary
 
@@ -28,13 +30,14 @@ help: ## Show this beautiful help menu (default)
 	@echo "$(CYAN)║                   Jungo App - Makefile Help              ║$(RESET)"
 	@echo "$(CYAN)╚══════════════════════════════════════════════════════════╝$(RESET)"
 	@awk 'BEGIN {FS = ":.*?## "; printf "\n"} \
-		/^#  .* (Commands|Testing|Migrations|Generation|Utility|Documentation|Testing).*$$/ { printf "\n$(YELLOW)%s $(RESET)\n", substr($$0, 4) } \
-		/^[a-zA-Z0-9_-]+:.*?## / { printf "  $(GREEN)%-25s$(RESET) %s\n", $$1, $$2 }' \
+		prev ~ /^# =+$$/ && /^# +[A-Z]/ { sub(/^# +/, ""); printf "\n$(YELLOW)%s$(RESET)\n", $$0 } \
+		/^[a-zA-Z0-9_-]+:.*?## / { printf "  $(GREEN)%-25s$(RESET) %s\n", $$1, $$2 } \
+		{ prev = $$0 }' \
 		$(MAKEFILE_LIST)
 	@echo ""
 	@echo "$(CYAN)Tips:$(RESET)"
 	@echo "$(CYAN) • Run 'make' or 'make help' to see this menu.$(RESET)"
-	@echo "$(CYAN) • Use 'make app-dev LOG=full' for full logs in dev mode.$(RESET)"
+	@echo "$(CYAN) • Add V=1 to any target to print the commands it runs.$(RESET)"
 
 .DEFAULT_GOAL := help
 
@@ -58,7 +61,8 @@ app-dev-bg: ## Same as app-dev, detached
 app-dev-down: ## Stop and remove the dev stack
 	$(Q)$(COMPOSE_DEV) down
 
-app-dev-local: ## Same as app-dev, but uses local ../junkit (see go.work.local) — personal only, gitignored
+# Same as app-dev, but uses a local ../junkit (go.work.local); for junkit's own development.
+app-dev-local:
 	$(Q)$(COMPOSE_DEV) -f deploy/docker-compose.local.yaml $(PROFILE) up --build
 
 app-logs: ## Follow the app container's logs
@@ -68,7 +72,7 @@ app-logs: ## Follow the app container's logs
 # Production
 # =============================================================================
 .PHONY: app-prod app-prod-bg app-prod-down
-app-prod: ## Build and start the prod stack (App + PostgreSQL). Add WITH=cache or WITH=full for optional services.
+app-prod: ## Build and start the prod stack (migrations, App, PostgreSQL). Add WITH=cache or WITH=full for optional services.
 	$(Q)$(COMPOSE_PROD) $(PROFILE) up --build
 
 app-prod-bg: ## Same as app-prod, detached
@@ -81,6 +85,7 @@ app-prod-down: ## Stop and remove the prod stack
 #  Database Migrations (require DB running - run 'make app-dev-bg' first)
 #  Install: go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@latest
 #  Website: https://github.com/golang-migrate/migrate/tree/master/cmd/migrate
+#  Production needs none of this: its stack runs the console's db:migrate, built into the image.
 # =============================================================================
 .PHONY: migrate-create migrate-up migrate-down migrate-refresh migrate-functions db-seed sqlc
 migrate-create: ## Create a new migration: make migrate-create NAME=add_x_table
@@ -106,7 +111,8 @@ migrate-functions: ## Apply every internal/database/primary/functions/*.sql (ide
 		psql $(PRIMARY_DSN) -v ON_ERROR_STOP=1 -f "$$file"; \
 	done
 
-db-seed: ## Apply every internal/database/primary/seeders/*.sql in order (demo data, idempotent — never run in production)
+db-seed: ## Apply every internal/database/primary/seeders/*.sql in order (demo data, idempotent; development only)
+	@if [ "$(API_ENVIRONMENT)" != "development" ]; then echo "db-seed creates demo accounts (admin@jungo.com / Password@123): API_ENVIRONMENT must be development" && exit 1; fi
 	$(Q)for file in $(PRIMARY_DIR)/seeders/*.sql; do \
 		[ -f "$$file" ] || continue; \
 		echo "Seeding $$file..."; \
@@ -143,7 +149,7 @@ feature-remove: ## Remove a generated feature: make feature-remove NAME=product
 	@if [ -z "$(NAME)" ]; then echo "Usage: make feature-remove NAME=<snake_case_name>" && exit 1; fi
 	$(Q)go run ./cmd/scaffold -name $(NAME) -mode remove
 
-command: ## Generate a new CLI command: make command NAME=health-check SIGNATURE=health:check [FEATURE=user]
+command: ## Generate a new CLI command: make command NAME=sync_orders SIGNATURE=order:sync [FEATURE=order]
 	@if [ -z "$(NAME)" ] || [ -z "$(SIGNATURE)" ]; then echo "Usage: make command NAME=<snake_case_name> SIGNATURE=<cli:signature> [FEATURE=<feature_name>]" && exit 1; fi
 	$(Q)go run ./cmd/scaffold -type command -name $(NAME) -signature $(SIGNATURE) -feature "$(FEATURE)"
 
@@ -151,7 +157,7 @@ command: ## Generate a new CLI command: make command NAME=health-check SIGNATURE
 # Console
 # =============================================================================
 .PHONY: console
-console: ## Run a CLI command inside whichever app stack is running, dev or prod: make console CMD="user:list" [ARGS="..."]
+console: ## Run a CLI command inside whichever app stack is running, dev or prod: make console CMD="health:check" [ARGS="..."]
 	@if [ -z "$(CMD)" ]; then echo "Usage: make console CMD=<command> [ARGS=...]" && exit 1; fi
 	@if [ -n "$$($(COMPOSE_DEV) ps -q app 2>/dev/null)" ]; then \
 		$(COMPOSE_DEV) exec app go run ./cmd/console $(CMD) $(ARGS); \

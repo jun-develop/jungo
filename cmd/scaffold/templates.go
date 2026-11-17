@@ -11,43 +11,72 @@ import (
 // featureFiles returns the list of files to generate for a new feature.
 func featureFiles(data scaffold.FeatureData, migrationSeq string) []scaffold.File {
 	dir := filepath.Join(featuresDir, data.Name)
+	file := func(path, tmpl string) scaffold.File {
+		return scaffold.File{Path: path, Template: fill(tmpl, data)}
+	}
 
 	return []scaffold.File{
-		{Path: filepath.Join(migrationsDir, fmt.Sprintf("%s_%s.up.sql", migrationSeq, data.Table)), Template: migrationUpTmpl(strings.ToUpper(data.Table))},
-		{Path: filepath.Join(migrationsDir, fmt.Sprintf("%s_%s.down.sql", migrationSeq, data.Table)), Template: migrationDownTmpl},
-		{Path: filepath.Join(queriesDir, data.Name+".sql"), Template: queriesTmpl},
-		{Path: filepath.Join(dir, "domain", data.Name+".go"), Template: domainTmpl},
-		{Path: filepath.Join(dir, "domain", "errors.go"), Template: domainErrorsTmpl},
-		{Path: filepath.Join(dir, "domain", "permission.go"), Template: domainPermissionTmpl},
-		{Path: filepath.Join(dir, "repository", data.Name+"_repository.go"), Template: repositoryTmpl},
-		{Path: filepath.Join(dir, "service", data.Name+"_service.go"), Template: serviceTmpl},
-		{Path: filepath.Join(dir, "service", data.Name+"_service_test.go"), Template: serviceTestTmpl},
-		{Path: filepath.Join(dir, "dto", "v1", data.Name+"_dto.go"), Template: dtoTmpl},
-		{Path: filepath.Join(dir, "handler", "v1", data.Name+"_handler.go"), Template: handlerTmpl},
-		{Path: filepath.Join(dir, "router", "v1", data.Name+"_router.go"), Template: routerTmpl},
-		{Path: filepath.Join(dir, "module.go"), Template: moduleTmplFor(data.Plural)},
+		file(filepath.Join(migrationsDir, fmt.Sprintf("%s_%s.up.sql", migrationSeq, data.Table)), migrationUpTmpl),
+		file(filepath.Join(migrationsDir, fmt.Sprintf("%s_%s.down.sql", migrationSeq, data.Table)), migrationDownTmpl),
+		file(filepath.Join(queriesDir, data.Name+".sql"), queriesTmpl),
+		file(filepath.Join(dir, "domain", data.Name+".go"), domainTmpl),
+		file(filepath.Join(dir, "domain", "errors.go"), domainErrorsTmpl),
+		file(filepath.Join(dir, "domain", "permission.go"), domainPermissionTmpl),
+		file(filepath.Join(dir, "repository", data.Name+"_repository.go"), repositoryTmpl),
+		file(filepath.Join(dir, "service", data.Name+"_service.go"), serviceTmpl),
+		file(filepath.Join(dir, "service", data.Name+"_service_test.go"), serviceTestTmpl),
+		file(filepath.Join(dir, "dto", "v1", data.Name+"_dto.go"), dtoTmpl),
+		file(filepath.Join(dir, "handler", "v1", data.Name+"_handler.go"), handlerTmpl),
+		file(filepath.Join(dir, "router", "v1", data.Name+"_router.go"), routerTmpl),
+		file(filepath.Join(dir, "module.go"), moduleTmpl),
 	}
 }
 
-// moduleTmplFor builds the module template with the permission labels' words ("order_items" ->
-// "order items", "Order items") filled in, because text/template cannot replace or capitalize.
-func moduleTmplFor(plural string) string {
-	words := strings.ReplaceAll(plural, "_", " ")
+// fill replaces the placeholders text/template cannot compute: name forms it has no function for,
+// and @@, which stands for a backtick (struct tags) because the templates are raw strings.
+//
+//	PASCAL_PLURAL  "order_items" -> "OrderItems" (identifiers: OrderItemsRead, ListOrderItems)
+//	TABLE_UPPER    "order_items" -> "ORDER_ITEMS"
+//	NAME_WORDS     "order_item"  -> "Order item" (messages)
+//	PLURAL_WORDS   "order_items" -> "order items"; PLURAL_TITLE -> "Order items"
+func fill(tmpl string, data scaffold.FeatureData) string {
+	pluralWords := strings.ReplaceAll(data.Plural, "_", " ")
+	nameWords := strings.ReplaceAll(data.Name, "_", " ")
 
 	return strings.NewReplacer(
-		"PLURAL_WORDS", words,
-		"PLURAL_TITLE", strings.ToUpper(words[:1])+words[1:],
-	).Replace(moduleTmpl)
+		"PASCAL_PLURAL", pascal(data.Plural),
+		"TABLE_UPPER", strings.ToUpper(data.Table),
+		"NAME_WORDS", capitalize(nameWords),
+		"PLURAL_WORDS", pluralWords,
+		"PLURAL_TITLE", capitalize(pluralWords),
+		"@@", "`",
+	).Replace(tmpl)
 }
 
-// migrationUpTmpl builds the up-migration template; tableUpper is passed in because
-// text/template has no uppercase function.
-func migrationUpTmpl(tableUpper string) string {
-	return fmt.Sprintf(`-- =============================================================================
--- %s TABLE
+// pascal converts snake_case to PascalCase ("order_items" -> "OrderItems").
+func pascal(snake string) string {
+	parts := strings.Split(snake, "_")
+	for i, p := range parts {
+		parts[i] = capitalize(p)
+	}
+
+	return strings.Join(parts, "")
+}
+
+// capitalize upper-cases the first letter of an ASCII word.
+func capitalize(s string) string {
+	if s == "" {
+		return s
+	}
+
+	return strings.ToUpper(s[:1]) + s[1:]
+}
+
+const migrationUpTmpl = `-- =============================================================================
+-- TABLE_UPPER TABLE
 -- =============================================================================
 
-CREATE TABLE IF NOT EXISTS {{.Table}} (`, tableUpper) + `
+CREATE TABLE IF NOT EXISTS {{.Table}} (
     id         BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
     uuid       UUID NOT NULL DEFAULT gen_random_uuid(),
     name       VARCHAR(150) NOT NULL,
@@ -56,28 +85,19 @@ CREATE TABLE IF NOT EXISTS {{.Table}} (`, tableUpper) + `
     updated_at TIMESTAMPTZ,
     deleted_at TIMESTAMPTZ,
 
-    CONSTRAINT uq_{{.Table}}_uuid UNIQUE (uuid)
+    CONSTRAINT uq_{{.Table}}_uuid UNIQUE (uuid),
+    CONSTRAINT chk_{{.Table}}_status CHECK (status IN (1, 2))
 );
 
-CREATE INDEX IF NOT EXISTS idx_{{.Table}}_created_at ON {{.Table}} (created_at);
-CREATE INDEX IF NOT EXISTS idx_{{.Table}}_deleted_at ON {{.Table}} (deleted_at);
+COMMENT ON COLUMN {{.Table}}.status IS '1 = active, 2 = inactive';
 
--- =============================================================================
--- updated_at trigger
--- =============================================================================
-
-CREATE OR REPLACE FUNCTION f_set_{{.Table}}_updated_at()
-RETURNS TRIGGER AS $$
-BEGIN
-    NEW.updated_at = now();
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
+-- List pages active rows by (created_at, id).
+CREATE INDEX IF NOT EXISTS idx_{{.Table}}_active_created_at ON {{.Table}} (created_at, id) WHERE deleted_at IS NULL;
 
 CREATE TRIGGER trg_{{.Table}}_updated_at
     BEFORE UPDATE ON {{.Table}}
     FOR EACH ROW
-    EXECUTE FUNCTION f_set_{{.Table}}_updated_at();
+    EXECUTE FUNCTION f_set_updated_at();
 
 -- =============================================================================
 -- PERMISSIONS
@@ -98,16 +118,13 @@ JOIN permissions p ON p.code IN ('{{.Plural}}:read', '{{.Plural}}:create', '{{.P
 WHERE r.code = 'super_admin'
 ON CONFLICT DO NOTHING;
 `
-}
 
 // migrationDownTmpl deletes the feature's permissions (their role grants go with them, ON DELETE
-// CASCADE), then its table.
+// CASCADE), then its table; the shared f_set_updated_at stays.
 const migrationDownTmpl = `DELETE FROM permissions WHERE code IN ('{{.Plural}}:read', '{{.Plural}}:create', '{{.Plural}}:update', '{{.Plural}}:delete');
 
 DROP TRIGGER IF EXISTS trg_{{.Table}}_updated_at ON {{.Table}};
-DROP FUNCTION IF EXISTS f_set_{{.Table}}_updated_at;
-DROP INDEX IF EXISTS idx_{{.Table}}_deleted_at;
-DROP INDEX IF EXISTS idx_{{.Table}}_created_at;
+DROP INDEX IF EXISTS idx_{{.Table}}_active_created_at;
 DROP TABLE IF EXISTS {{.Table}};
 `
 
@@ -119,17 +136,23 @@ RETURNING *;
 -- name: Get{{.Pascal}}ByUUID :one
 SELECT * FROM {{.Table}} WHERE uuid = $1 AND deleted_at IS NULL;
 
--- name: List{{.Pascal}}s :many
--- No count(*) OVER(): it makes Postgres read and sort every matching row to return one page.
+-- name: ListPASCAL_PLURALNewest :many
+-- Newest first. One query per direction, so both page through idx_{{.Table}}_active_created_at. No
+-- count(*) OVER(): it makes Postgres read and sort every matching row to return one page.
 SELECT * FROM {{.Table}}
 WHERE deleted_at IS NULL
   AND (sqlc.arg(search)::text = '' OR name ILIKE '%' || sqlc.arg(search) || '%')
-ORDER BY
-    CASE WHEN sqlc.arg(sort_order)::text = 'asc' THEN created_at END ASC,
-    CASE WHEN sqlc.arg(sort_order)::text = 'desc' OR sqlc.arg(sort_order)::text = '' THEN created_at END DESC
+ORDER BY created_at DESC, id DESC
 LIMIT sqlc.arg('limit') OFFSET sqlc.arg('offset');
 
--- name: Count{{.Pascal}}s :one
+-- name: ListPASCAL_PLURALOldest :many
+SELECT * FROM {{.Table}}
+WHERE deleted_at IS NULL
+  AND (sqlc.arg(search)::text = '' OR name ILIKE '%' || sqlc.arg(search) || '%')
+ORDER BY created_at, id
+LIMIT sqlc.arg('limit') OFFSET sqlc.arg('offset');
+
+-- name: CountPASCAL_PLURAL :one
 SELECT count(*) FROM {{.Table}}
 WHERE deleted_at IS NULL
   AND (sqlc.arg(search)::text = '' OR name ILIKE '%' || sqlc.arg(search) || '%');
@@ -154,11 +177,37 @@ import (
 	"github.com/google/uuid"
 )
 
-// {{.Pascal}} status constants.
+// {{.Pascal}} status constants ({{.Table}}.status).
 const (
 	{{.Pascal}}StatusActive   int16 = 1
 	{{.Pascal}}StatusInactive int16 = 2
 )
+
+// {{.Camel}}StatusNames maps each status code to its API name.
+var {{.Camel}}StatusNames = map[int16]string{
+	{{.Pascal}}StatusActive:   "active",
+	{{.Pascal}}StatusInactive: "inactive",
+}
+
+// {{.Pascal}}StatusName returns the API name of a status code ("unknown" if unmapped).
+func {{.Pascal}}StatusName(status int16) string {
+	if name, ok := {{.Camel}}StatusNames[status]; ok {
+		return name
+	}
+
+	return "unknown"
+}
+
+// Parse{{.Pascal}}Status returns the status code for an API name.
+func Parse{{.Pascal}}Status(name string) (int16, bool) {
+	for status, n := range {{.Camel}}StatusNames {
+		if n == name {
+			return status, true
+		}
+	}
+
+	return 0, false
+}
 
 // {{.Pascal}} represents the {{.Name}} entity.
 type {{.Pascal}} struct {
@@ -174,19 +223,18 @@ func (m *{{.Pascal}}) IsActive() bool {
 	return m.Status == {{.Pascal}}StatusActive
 }
 
-// Create{{.Pascal}}Input holds data for creating a {{.Name}}.
+// Create{{.Pascal}}Input holds data for creating a {{.Name}}; new ones are active.
 type Create{{.Pascal}}Input struct {
-	Name   string
-	Status int16
+	Name string
 }
 
-// Update{{.Pascal}}Input holds data for updating a {{.Name}}.
+// Update{{.Pascal}}Input holds data for updating a {{.Name}}. A nil field is left unchanged.
 type Update{{.Pascal}}Input struct {
 	Name   *string
 	Status *int16
 }
 
-// {{.Pascal}}ListFilter holds parameters for filtering and paginating {{.Name}}s.
+// {{.Pascal}}ListFilter holds parameters for filtering and paginating PLURAL_WORDS.
 type {{.Pascal}}ListFilter struct {
 	Search    string
 	Limit     int32
@@ -194,8 +242,9 @@ type {{.Pascal}}ListFilter struct {
 	SortOrder string
 }
 
-// {{.Pascal}}Repository defines database operations for {{.Name}}s.
+// {{.Pascal}}Repository defines database operations for PLURAL_WORDS.
 type {{.Pascal}}Repository interface {
+	WithTransaction(ctx context.Context, fn func(ctx context.Context) error) error
 	Create(ctx context.Context, input Create{{.Pascal}}Input) (*{{.Pascal}}, error)
 	GetByUUID(ctx context.Context, uid uuid.UUID) (*{{.Pascal}}, error)
 	List(ctx context.Context, filter {{.Pascal}}ListFilter) ([]*{{.Pascal}}, int64, error)
@@ -203,11 +252,11 @@ type {{.Pascal}}Repository interface {
 	Delete(ctx context.Context, uid uuid.UUID) error
 }
 
-// {{.Pascal}}Service defines business logic for {{.Name}}s.
+// {{.Pascal}}Service defines business logic for PLURAL_WORDS.
 type {{.Pascal}}Service interface {
 	Create{{.Pascal}}(ctx context.Context, input Create{{.Pascal}}Input) (*{{.Pascal}}, error)
 	Get{{.Pascal}}(ctx context.Context, uid uuid.UUID) (*{{.Pascal}}, error)
-	Get{{.Pascal}}s(ctx context.Context, filter {{.Pascal}}ListFilter) ([]*{{.Pascal}}, int64, error)
+	ListPASCAL_PLURAL(ctx context.Context, filter {{.Pascal}}ListFilter) ([]*{{.Pascal}}, int64, error)
 	Update{{.Pascal}}(ctx context.Context, uid uuid.UUID, input Update{{.Pascal}}Input) (*{{.Pascal}}, error)
 	Delete{{.Pascal}}(ctx context.Context, uid uuid.UUID) error
 }
@@ -216,17 +265,17 @@ type {{.Pascal}}Service interface {
 const domainPermissionTmpl = `package domain
 
 // Permission codes ("resource:action") the {{.Name}} feature checks; each must also be a row in the
-// permissions table.
+// permissions table (this feature's migration inserts them).
 const (
-	{{.Pascal}}sRead   = "{{.Plural}}:read"
-	{{.Pascal}}sCreate = "{{.Plural}}:create"
-	{{.Pascal}}sUpdate = "{{.Plural}}:update"
-	{{.Pascal}}sDelete = "{{.Plural}}:delete"
+	PASCAL_PLURALRead   = "{{.Plural}}:read"
+	PASCAL_PLURALCreate = "{{.Plural}}:create"
+	PASCAL_PLURALUpdate = "{{.Plural}}:update"
+	PASCAL_PLURALDelete = "{{.Plural}}:delete"
 )
 
 // Permissions lists the {{.Name}} feature's permission codes; the module provides them to the
 // "permissions" Fx group.
-var Permissions = []string{ {{- .Pascal}}sRead, {{.Pascal}}sCreate, {{.Pascal}}sUpdate, {{.Pascal}}sDelete}
+var Permissions = []string{PASCAL_PLURALRead, PASCAL_PLURALCreate, PASCAL_PLURALUpdate, PASCAL_PLURALDelete}
 `
 
 const domainErrorsTmpl = `package domain
@@ -264,14 +313,19 @@ func New{{.Pascal}}Repository(db *primary.DB) *{{.Pascal}}Repository {
 	return &{{.Pascal}}Repository{db: db}
 }
 
-// Create implements domain.{{.Pascal}}Repository.
+// WithTransaction implements domain.{{.Pascal}}Repository.
+func (r *{{.Pascal}}Repository) WithTransaction(ctx context.Context, fn func(ctx context.Context) error) error {
+	return r.db.WithTransaction(ctx, fn)
+}
+
+// Create implements domain.{{.Pascal}}Repository; new PLURAL_WORDS are active.
 func (r *{{.Pascal}}Repository) Create(ctx context.Context, input domain.Create{{.Pascal}}Input) (*domain.{{.Pascal}}, error) {
 	row, err := r.db.Queries(ctx).Create{{.Pascal}}(ctx, sqlc.Create{{.Pascal}}Params{
 		Name:   input.Name,
-		Status: input.Status,
+		Status: domain.{{.Pascal}}StatusActive,
 	})
 	if err != nil {
-		return nil, err
+		return nil, wrap("create", err)
 	}
 
 	return map{{.Pascal}}(row), nil
@@ -281,7 +335,7 @@ func (r *{{.Pascal}}Repository) Create(ctx context.Context, input domain.Create{
 func (r *{{.Pascal}}Repository) GetByUUID(ctx context.Context, uid uuid.UUID) (*domain.{{.Pascal}}, error) {
 	row, err := r.db.Queries(ctx).Get{{.Pascal}}ByUUID(ctx, uid)
 	if err != nil {
-		return nil, database.MatchNotFound(err, domain.Err{{.Pascal}}NotFound)
+		return nil, wrap("get by uuid", database.MatchNotFound(err, domain.Err{{.Pascal}}NotFound))
 	}
 
 	return map{{.Pascal}}(row), nil
@@ -292,14 +346,16 @@ func (r *{{.Pascal}}Repository) List(ctx context.Context, filter domain.{{.Pasca
 	queries := r.db.Queries(ctx)
 	search := database.EscapeLike(filter.Search)
 
-	rows, err := queries.List{{.Pascal}}s(ctx, sqlc.List{{.Pascal}}sParams{
-		Limit:     filter.Limit,
-		Offset:    filter.Offset,
-		Search:    search,
-		SortOrder: filter.SortOrder,
-	})
+	var rows []sqlc.{{.Model}}
+	var err error
+	if filter.SortOrder == "asc" {
+		rows, err = queries.ListPASCAL_PLURALOldest(ctx, sqlc.ListPASCAL_PLURALOldestParams{Search: search, Limit: filter.Limit, Offset: filter.Offset})
+	} else {
+		rows, err = queries.ListPASCAL_PLURALNewest(ctx, sqlc.ListPASCAL_PLURALNewestParams{Search: search, Limit: filter.Limit, Offset: filter.Offset})
+	}
+
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, wrap("list", err)
 	}
 
 	items := slicex.Map(rows, map{{.Pascal}})
@@ -309,9 +365,9 @@ func (r *{{.Pascal}}Repository) List(ctx context.Context, filter domain.{{.Pasca
 		return items, int64(filter.Offset) + int64(len(rows)), nil
 	}
 
-	total, err := queries.Count{{.Pascal}}s(ctx, search)
+	total, err := queries.CountPASCAL_PLURAL(ctx, search)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, wrap("count", err)
 	}
 
 	return items, total, nil
@@ -325,7 +381,7 @@ func (r *{{.Pascal}}Repository) Update(ctx context.Context, uid uuid.UUID, input
 		Status: input.Status,
 	})
 	if err != nil {
-		return nil, database.MatchNotFound(err, domain.Err{{.Pascal}}NotFound)
+		return nil, wrap("update", database.MatchNotFound(err, domain.Err{{.Pascal}}NotFound))
 	}
 
 	return map{{.Pascal}}(row), nil
@@ -333,12 +389,12 @@ func (r *{{.Pascal}}Repository) Update(ctx context.Context, uid uuid.UUID, input
 
 // Delete implements domain.{{.Pascal}}Repository; it soft-deletes via deleted_at.
 func (r *{{.Pascal}}Repository) Delete(ctx context.Context, uid uuid.UUID) error {
-	rowsAffected, err := r.db.Queries(ctx).Delete{{.Pascal}}(ctx, uid)
+	n, err := r.db.Queries(ctx).Delete{{.Pascal}}(ctx, uid)
 	if err != nil {
-		return err
+		return wrap("delete", err)
 	}
 
-	if rowsAffected == 0 {
+	if n == 0 {
 		return domain.Err{{.Pascal}}NotFound
 	}
 
@@ -355,32 +411,30 @@ func map{{.Pascal}}(row sqlc.{{.Model}}) *domain.{{.Pascal}} {
 		UpdatedAt: row.UpdatedAt,
 	}
 }
+
+// wrap adds the failed operation to err; domain errors stay matchable with errors.Is/As.
+var wrap = database.Wrapper("{{.Name}} repository")
 `
 
 const serviceTmpl = `package service
 
 import (
 	"context"
-	"time"
 
 	"github.com/google/uuid"
-
-	"github.com/jun-develop/junkit/cache"
 
 	"{{.Module}}/internal/features/{{.Name}}/domain"
 )
 
-const cacheTTL = 5 * time.Minute
-
-// {{.Pascal}}Service implements domain.{{.Pascal}}Service.
+// {{.Pascal}}Service implements domain.{{.Pascal}}Service. Every route requires its permission
+// (see the router), so the methods do no permission check of their own.
 type {{.Pascal}}Service struct {
-	repo  domain.{{.Pascal}}Repository
-	cache cache.Cache[*domain.{{.Pascal}}]
+	repo domain.{{.Pascal}}Repository
 }
 
 // New{{.Pascal}}Service creates a {{.Pascal}}Service.
-func New{{.Pascal}}Service(repo domain.{{.Pascal}}Repository, cache cache.Cache[*domain.{{.Pascal}}]) *{{.Pascal}}Service {
-	return &{{.Pascal}}Service{repo: repo, cache: cache}
+func New{{.Pascal}}Service(repo domain.{{.Pascal}}Repository) *{{.Pascal}}Service {
+	return &{{.Pascal}}Service{repo: repo}
 }
 
 // Create{{.Pascal}} creates a new {{.Name}}.
@@ -390,46 +444,22 @@ func (s *{{.Pascal}}Service) Create{{.Pascal}}(ctx context.Context, input domain
 
 // Get{{.Pascal}} returns a {{.Name}} by UUID.
 func (s *{{.Pascal}}Service) Get{{.Pascal}}(ctx context.Context, uid uuid.UUID) (*domain.{{.Pascal}}, error) {
-	return s.cache.GetOrSet(ctx, cacheKey(uid), cacheTTL, func() (*domain.{{.Pascal}}, error) {
-		return s.repo.GetByUUID(ctx, uid)
-	})
+	return s.repo.GetByUUID(ctx, uid)
 }
 
-// Get{{.Pascal}}s returns a paginated list of {{.Name}}s.
-func (s *{{.Pascal}}Service) Get{{.Pascal}}s(ctx context.Context, filter domain.{{.Pascal}}ListFilter) ([]*domain.{{.Pascal}}, int64, error) {
+// ListPASCAL_PLURAL returns a page of PLURAL_WORDS.
+func (s *{{.Pascal}}Service) ListPASCAL_PLURAL(ctx context.Context, filter domain.{{.Pascal}}ListFilter) ([]*domain.{{.Pascal}}, int64, error) {
 	return s.repo.List(ctx, filter)
 }
 
-// Update{{.Pascal}} updates {{.Name}} information.
-//
-// Flow: update in DB -> invalidate cache
+// Update{{.Pascal}} updates a {{.Name}}.
 func (s *{{.Pascal}}Service) Update{{.Pascal}}(ctx context.Context, uid uuid.UUID, input domain.Update{{.Pascal}}Input) (*domain.{{.Pascal}}, error) {
-	updated, err := s.repo.Update(ctx, uid, input)
-	if err != nil {
-		return nil, err
-	}
-
-	_ = s.cache.Delete(ctx, cacheKey(uid))
-
-	return updated, nil
+	return s.repo.Update(ctx, uid, input)
 }
 
 // Delete{{.Pascal}} deletes a {{.Name}} by UUID.
-//
-// Flow: delete in DB -> invalidate cache
 func (s *{{.Pascal}}Service) Delete{{.Pascal}}(ctx context.Context, uid uuid.UUID) error {
-	if err := s.repo.Delete(ctx, uid); err != nil {
-		return err
-	}
-
-	_ = s.cache.Delete(ctx, cacheKey(uid))
-
-	return nil
-}
-
-// cacheKey returns the cache key for a {{.Name}} identified by uuid.
-func cacheKey(uid uuid.UUID) string {
-	return "{{.Name}}:" + uid.String()
+	return s.repo.Delete(ctx, uid)
 }
 `
 
@@ -439,21 +469,24 @@ import (
 	"context"
 	"errors"
 	"testing"
-	"time"
 
 	"github.com/google/uuid"
 
 	"{{.Module}}/internal/features/{{.Name}}/domain"
 )
 
-// fake{{.Pascal}}Repository is a test double for domain.{{.Pascal}}Repository;
-// calling an unset Func panics.
+// fake{{.Pascal}}Repository is a test double for domain.{{.Pascal}}Repository; calling an unset
+// Func panics.
 type fake{{.Pascal}}Repository struct {
 	CreateFunc    func(ctx context.Context, input domain.Create{{.Pascal}}Input) (*domain.{{.Pascal}}, error)
 	GetByUUIDFunc func(ctx context.Context, uid uuid.UUID) (*domain.{{.Pascal}}, error)
 	ListFunc      func(ctx context.Context, filter domain.{{.Pascal}}ListFilter) ([]*domain.{{.Pascal}}, int64, error)
 	UpdateFunc    func(ctx context.Context, uid uuid.UUID, input domain.Update{{.Pascal}}Input) (*domain.{{.Pascal}}, error)
 	DeleteFunc    func(ctx context.Context, uid uuid.UUID) error
+}
+
+func (f *fake{{.Pascal}}Repository) WithTransaction(ctx context.Context, fn func(ctx context.Context) error) error {
+	return fn(ctx)
 }
 
 func (f *fake{{.Pascal}}Repository) Create(ctx context.Context, input domain.Create{{.Pascal}}Input) (*domain.{{.Pascal}}, error) {
@@ -476,50 +509,15 @@ func (f *fake{{.Pascal}}Repository) Delete(ctx context.Context, uid uuid.UUID) e
 	return f.DeleteFunc(ctx, uid)
 }
 
-// fake{{.Pascal}}Cache always misses (GetOrSet calls fetchFn) and records deleted keys.
-type fake{{.Pascal}}Cache struct {
-	deletedKeys []string
-}
-
-func (f *fake{{.Pascal}}Cache) Get(ctx context.Context, key string) (*domain.{{.Pascal}}, bool) {
-	return nil, false
-}
-
-func (f *fake{{.Pascal}}Cache) Set(ctx context.Context, key string, value *domain.{{.Pascal}}, ttl time.Duration) error {
-	return nil
-}
-
-func (f *fake{{.Pascal}}Cache) Delete(ctx context.Context, key string) error {
-	f.deletedKeys = append(f.deletedKeys, key)
-	return nil
-}
-
-func (f *fake{{.Pascal}}Cache) Exists(ctx context.Context, key string) (bool, error) {
-	return false, nil
-}
-
-func (f *fake{{.Pascal}}Cache) Incr(ctx context.Context, key string, ttl time.Duration) (int64, error) {
-	return 0, nil
-}
-
-func (f *fake{{.Pascal}}Cache) GetOrSet(ctx context.Context, key string, ttl time.Duration, fetchFn func() (*domain.{{.Pascal}}, error)) (*domain.{{.Pascal}}, error) {
-	return fetchFn()
-}
-
-func (f *fake{{.Pascal}}Cache) Close() error {
-	return nil
-}
-
-func TestCreate{{.Pascal}}(t *testing.T) {
+func Test{{.Pascal}}Service_Create{{.Pascal}}(t *testing.T) {
 	want := &domain.{{.Pascal}}{Name: "widget"}
 	repo := &fake{{.Pascal}}Repository{
 		CreateFunc: func(context.Context, domain.Create{{.Pascal}}Input) (*domain.{{.Pascal}}, error) {
 			return want, nil
 		},
 	}
-	svc := New{{.Pascal}}Service(repo, &fake{{.Pascal}}Cache{})
 
-	got, err := svc.Create{{.Pascal}}(context.Background(), domain.Create{{.Pascal}}Input{Name: "widget"})
+	got, err := New{{.Pascal}}Service(repo).Create{{.Pascal}}(context.Background(), domain.Create{{.Pascal}}Input{Name: "widget"})
 	if err != nil {
 		t.Fatalf("Create{{.Pascal}}() error = %v, want nil", err)
 	}
@@ -529,137 +527,81 @@ func TestCreate{{.Pascal}}(t *testing.T) {
 	}
 }
 
-func TestGet{{.Pascal}}(t *testing.T) {
+func Test{{.Pascal}}Service_Get{{.Pascal}}(t *testing.T) {
 	uid := uuid.New()
-	want := &domain.{{.Pascal}}{UUID: uid}
-	repo := &fake{{.Pascal}}Repository{
-		GetByUUIDFunc: func(_ context.Context, gotID uuid.UUID) (*domain.{{.Pascal}}, error) {
-			if gotID != uid {
-				t.Errorf("GetByUUID called with %v, want %v", gotID, uid)
-			}
 
-			return want, nil
-		},
-	}
-	svc := New{{.Pascal}}Service(repo, &fake{{.Pascal}}Cache{})
+	t.Run("returns the {{.Name}}", func(t *testing.T) {
+		want := &domain.{{.Pascal}}{UUID: uid}
+		repo := &fake{{.Pascal}}Repository{
+			GetByUUIDFunc: func(_ context.Context, got uuid.UUID) (*domain.{{.Pascal}}, error) {
+				if got != uid {
+					t.Errorf("GetByUUID called with %v, want %v", got, uid)
+				}
 
-	got, err := svc.Get{{.Pascal}}(context.Background(), uid)
-	if err != nil {
-		t.Fatalf("Get{{.Pascal}}() error = %v, want nil", err)
-	}
+				return want, nil
+			},
+		}
 
-	if got != want {
-		t.Errorf("Get{{.Pascal}}() = %v, want %v", got, want)
-	}
+		got, err := New{{.Pascal}}Service(repo).Get{{.Pascal}}(context.Background(), uid)
+		if err != nil {
+			t.Fatalf("Get{{.Pascal}}() error = %v, want nil", err)
+		}
+
+		if got != want {
+			t.Errorf("Get{{.Pascal}}() = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("propagates a repository error", func(t *testing.T) {
+		repo := &fake{{.Pascal}}Repository{
+			GetByUUIDFunc: func(context.Context, uuid.UUID) (*domain.{{.Pascal}}, error) {
+				return nil, domain.Err{{.Pascal}}NotFound
+			},
+		}
+
+		_, err := New{{.Pascal}}Service(repo).Get{{.Pascal}}(context.Background(), uid)
+		if !errors.Is(err, domain.Err{{.Pascal}}NotFound) {
+			t.Fatalf("Get{{.Pascal}}() error = %v, want %v", err, domain.Err{{.Pascal}}NotFound)
+		}
+	})
 }
 
-func TestGet{{.Pascal}}_RepositoryError(t *testing.T) {
-	wantErr := errors.New("not found")
-	repo := &fake{{.Pascal}}Repository{
-		GetByUUIDFunc: func(context.Context, uuid.UUID) (*domain.{{.Pascal}}, error) { return nil, wantErr },
-	}
-	svc := New{{.Pascal}}Service(repo, &fake{{.Pascal}}Cache{})
-
-	_, err := svc.Get{{.Pascal}}(context.Background(), uuid.New())
-	if !errors.Is(err, wantErr) {
-		t.Fatalf("Get{{.Pascal}}() error = %v, want %v", err, wantErr)
-	}
-}
-
-func TestGet{{.Pascal}}s(t *testing.T) {
+func Test{{.Pascal}}Service_ListPASCAL_PLURAL(t *testing.T) {
 	filter := domain.{{.Pascal}}ListFilter{Search: "widget", Limit: 10, SortOrder: "desc"}
-	wantItems := []*domain.{{.Pascal}}{ {Name: "widget"} }
 	repo := &fake{{.Pascal}}Repository{
-		ListFunc: func(_ context.Context, gotFilter domain.{{.Pascal}}ListFilter) ([]*domain.{{.Pascal}}, int64, error) {
-			if gotFilter != filter {
-				t.Errorf("List called with %+v, want %+v", gotFilter, filter)
+		ListFunc: func(_ context.Context, got domain.{{.Pascal}}ListFilter) ([]*domain.{{.Pascal}}, int64, error) {
+			if got != filter {
+				t.Errorf("List called with %+v, want %+v", got, filter)
 			}
 
-			return wantItems, 1, nil
+			return []*domain.{{.Pascal}}{ {Name: "widget"} }, 1, nil
 		},
 	}
-	svc := New{{.Pascal}}Service(repo, &fake{{.Pascal}}Cache{})
 
-	items, total, err := svc.Get{{.Pascal}}s(context.Background(), filter)
+	items, total, err := New{{.Pascal}}Service(repo).ListPASCAL_PLURAL(context.Background(), filter)
 	if err != nil {
-		t.Fatalf("Get{{.Pascal}}s() error = %v, want nil", err)
+		t.Fatalf("ListPASCAL_PLURAL() error = %v, want nil", err)
 	}
 
 	if total != 1 || len(items) != 1 {
-		t.Errorf("Get{{.Pascal}}s() = (%v, %d), want (1 item, 1)", items, total)
+		t.Errorf("ListPASCAL_PLURAL() = (%v, %d), want (1 item, 1)", items, total)
 	}
 }
 
-func TestUpdate{{.Pascal}}(t *testing.T) {
+func Test{{.Pascal}}Service_Delete{{.Pascal}}(t *testing.T) {
 	uid := uuid.New()
 	repo := &fake{{.Pascal}}Repository{
-		UpdateFunc: func(_ context.Context, gotID uuid.UUID, _ domain.Update{{.Pascal}}Input) (*domain.{{.Pascal}}, error) {
-			return &domain.{{.Pascal}}{UUID: gotID}, nil
+		DeleteFunc: func(_ context.Context, got uuid.UUID) error {
+			if got != uid {
+				t.Errorf("Delete called with %v, want %v", got, uid)
+			}
+
+			return nil
 		},
 	}
-	cache := &fake{{.Pascal}}Cache{}
-	svc := New{{.Pascal}}Service(repo, cache)
 
-	if _, err := svc.Update{{.Pascal}}(context.Background(), uid, domain.Update{{.Pascal}}Input{}); err != nil {
-		t.Fatalf("Update{{.Pascal}}() error = %v, want nil", err)
-	}
-
-	if len(cache.deletedKeys) != 1 || cache.deletedKeys[0] != cacheKey(uid) {
-		t.Errorf("cache.Delete calls = %v, want exactly [%q]", cache.deletedKeys, cacheKey(uid))
-	}
-}
-
-func TestUpdate{{.Pascal}}_DoesNotInvalidateCacheOnError(t *testing.T) {
-	wantErr := errors.New("db error")
-	repo := &fake{{.Pascal}}Repository{
-		UpdateFunc: func(context.Context, uuid.UUID, domain.Update{{.Pascal}}Input) (*domain.{{.Pascal}}, error) {
-			return nil, wantErr
-		},
-	}
-	cache := &fake{{.Pascal}}Cache{}
-	svc := New{{.Pascal}}Service(repo, cache)
-
-	_, err := svc.Update{{.Pascal}}(context.Background(), uuid.New(), domain.Update{{.Pascal}}Input{})
-	if !errors.Is(err, wantErr) {
-		t.Fatalf("Update{{.Pascal}}() error = %v, want %v", err, wantErr)
-	}
-
-	if len(cache.deletedKeys) != 0 {
-		t.Errorf("cache.Delete called %d times, want 0", len(cache.deletedKeys))
-	}
-}
-
-func TestDelete{{.Pascal}}(t *testing.T) {
-	uid := uuid.New()
-	repo := &fake{{.Pascal}}Repository{
-		DeleteFunc: func(context.Context, uuid.UUID) error { return nil },
-	}
-	cache := &fake{{.Pascal}}Cache{}
-	svc := New{{.Pascal}}Service(repo, cache)
-
-	if err := svc.Delete{{.Pascal}}(context.Background(), uid); err != nil {
+	if err := New{{.Pascal}}Service(repo).Delete{{.Pascal}}(context.Background(), uid); err != nil {
 		t.Fatalf("Delete{{.Pascal}}() error = %v, want nil", err)
-	}
-
-	if len(cache.deletedKeys) != 1 || cache.deletedKeys[0] != cacheKey(uid) {
-		t.Errorf("cache.Delete calls = %v, want exactly [%q]", cache.deletedKeys, cacheKey(uid))
-	}
-}
-
-func TestDelete{{.Pascal}}_DoesNotInvalidateCacheOnError(t *testing.T) {
-	wantErr := errors.New("not found")
-	repo := &fake{{.Pascal}}Repository{
-		DeleteFunc: func(context.Context, uuid.UUID) error { return wantErr },
-	}
-	cache := &fake{{.Pascal}}Cache{}
-	svc := New{{.Pascal}}Service(repo, cache)
-
-	if err := svc.Delete{{.Pascal}}(context.Background(), uuid.New()); !errors.Is(err, wantErr) {
-		t.Fatalf("Delete{{.Pascal}}() error = %v, want %v", err, wantErr)
-	}
-
-	if len(cache.deletedKeys) != 0 {
-		t.Errorf("cache.Delete called %d times, want 0", len(cache.deletedKeys))
 	}
 }
 `
@@ -679,54 +621,56 @@ import (
 
 // Create{{.Pascal}}Request is the request body for POST /{{.Plural}}.
 type Create{{.Pascal}}Request struct {
-	Name   string {{"` + "`" + `"}}json:"name" binding:"required,min=2,max=150"{{"` + "`" + `"}}
-	Status int16  {{"` + "`" + `"}}json:"status" binding:"omitempty,oneof=1 2"{{"` + "`" + `"}}
+	Name string @@json:"name" binding:"required,min=2,max=150"@@
 }
 
 // ToCreate{{.Pascal}}Input converts Create{{.Pascal}}Request to domain input.
 func ToCreate{{.Pascal}}Input(req Create{{.Pascal}}Request) domain.Create{{.Pascal}}Input {
-	status := req.Status
-	if status == 0 {
-		status = domain.{{.Pascal}}StatusActive
-	}
-
-	return domain.Create{{.Pascal}}Input{Name: req.Name, Status: status}
+	return domain.Create{{.Pascal}}Input{Name: req.Name}
 }
 
 // Update{{.Pascal}}Request is the request body for PATCH /{{.Plural}}/:uuid.
 type Update{{.Pascal}}Request struct {
-	Name   *string {{"` + "`" + `"}}json:"name" binding:"omitempty,min=2,max=150"{{"` + "`" + `"}}
-	Status *int16  {{"` + "`" + `"}}json:"status" binding:"omitempty,oneof=1 2"{{"` + "`" + `"}}
+	Name   *string @@json:"name" binding:"omitempty,min=2,max=150"@@
+	Status *string @@json:"status" binding:"omitempty,oneof=active inactive"@@
 }
 
 // ToUpdate{{.Pascal}}Input converts Update{{.Pascal}}Request to domain input.
 func ToUpdate{{.Pascal}}Input(req Update{{.Pascal}}Request) domain.Update{{.Pascal}}Input {
-	return domain.Update{{.Pascal}}Input{Name: req.Name, Status: req.Status}
+	var status *int16
+	if req.Status != nil {
+		// The binding tag guarantees a known name.
+		if s, ok := domain.Parse{{.Pascal}}Status(*req.Status); ok {
+			status = &s
+		}
+	}
+
+	return domain.Update{{.Pascal}}Input{Name: req.Name, Status: status}
 }
 
-// List{{.Pascal}}sRequest binds query parameters for listing {{.Table}}.
-type List{{.Pascal}}sRequest struct {
+// ListPASCAL_PLURALRequest binds query parameters for listing PLURAL_WORDS.
+type ListPASCAL_PLURALRequest struct {
 	pagination.Request
 }
 
-// ToFilter converts List{{.Pascal}}sRequest to domain filter.
-func (r *List{{.Pascal}}sRequest) ToFilter() domain.{{.Pascal}}ListFilter {
+// To{{.Pascal}}ListFilter converts ListPASCAL_PLURALRequest to domain filter.
+func To{{.Pascal}}ListFilter(req ListPASCAL_PLURALRequest) domain.{{.Pascal}}ListFilter {
 	return domain.{{.Pascal}}ListFilter{
-		Search:    r.Search,
-		Limit:     r.GetLimit(),
-		Offset:    r.GetOffset(),
-		SortOrder: r.SortOrder,
+		Search:    req.Search,
+		Limit:     req.GetLimit(),
+		Offset:    req.GetOffset(),
+		SortOrder: req.SortOrder,
 	}
 }
 
 // {{.Pascal}}Response represents the JSON response for a {{.Name}}.
 type {{.Pascal}}Response struct {
-	UUID      uuid.UUID  {{"` + "`" + `"}}json:"uuid"{{"` + "`" + `"}}
-	Name      string     {{"` + "`" + `"}}json:"name"{{"` + "`" + `"}}
-	Status    int16      {{"` + "`" + `"}}json:"status"{{"` + "`" + `"}}
-	Active    bool       {{"` + "`" + `"}}json:"active"{{"` + "`" + `"}}
-	CreatedAt time.Time  {{"` + "`" + `"}}json:"created_at"{{"` + "`" + `"}}
-	UpdatedAt *time.Time {{"` + "`" + `"}}json:"updated_at,omitempty"{{"` + "`" + `"}}
+	UUID      uuid.UUID  @@json:"uuid"@@
+	Name      string     @@json:"name"@@
+	Status    string     @@json:"status"@@
+	Active    bool       @@json:"active"@@
+	CreatedAt time.Time  @@json:"created_at"@@
+	UpdatedAt *time.Time @@json:"updated_at,omitempty"@@
 }
 
 // New{{.Pascal}}Response converts domain.{{.Pascal}} to {{.Pascal}}Response.
@@ -734,7 +678,7 @@ func New{{.Pascal}}Response(m *domain.{{.Pascal}}) {{.Pascal}}Response {
 	return {{.Pascal}}Response{
 		UUID:      m.UUID,
 		Name:      m.Name,
-		Status:    m.Status,
+		Status:    domain.{{.Pascal}}StatusName(m.Status),
 		Active:    m.IsActive(),
 		CreatedAt: m.CreatedAt,
 		UpdatedAt: m.UpdatedAt,
@@ -770,7 +714,11 @@ type {{.Pascal}}Handler struct {
 }
 
 // New{{.Pascal}}Handler creates a {{.Pascal}}Handler.
-func New{{.Pascal}}Handler(service domain.{{.Pascal}}Service, responder response.Responder, validator *validation.Validator) *{{.Pascal}}Handler {
+func New{{.Pascal}}Handler(
+	service domain.{{.Pascal}}Service,
+	responder response.Responder,
+	validator *validation.Validator,
+) *{{.Pascal}}Handler {
 	return &{{.Pascal}}Handler{service: service, responder: responder, validator: validator}
 }
 
@@ -806,23 +754,23 @@ func (h *{{.Pascal}}Handler) Get{{.Pascal}}(ctx *gin.Context) {
 	h.responder.SendWithData(ctx, http.StatusOK, "{{.Name}}_retrieved", v1dto.New{{.Pascal}}Response(item))
 }
 
-// List{{.Pascal}}s handles GET /{{.Plural}}.
-func (h *{{.Pascal}}Handler) List{{.Pascal}}s(ctx *gin.Context) {
-	var req v1dto.List{{.Pascal}}sRequest
+// ListPASCAL_PLURAL handles GET /{{.Plural}}.
+func (h *{{.Pascal}}Handler) ListPASCAL_PLURAL(ctx *gin.Context) {
+	var req v1dto.ListPASCAL_PLURALRequest
 	if !validation.BindQuery(ctx, h.responder, h.validator, &req) {
 		return
 	}
 
 	req.SetDefaults("created_at", "desc")
 
-	items, total, err := h.service.Get{{.Pascal}}s(ctx.Request.Context(), req.ToFilter())
+	items, total, err := h.service.ListPASCAL_PLURAL(ctx.Request.Context(), v1dto.To{{.Pascal}}ListFilter(req))
 	if err != nil {
 		h.responder.Error(ctx, err)
 		return
 	}
 
 	meta := pagination.NewPagination(req.Page, req.PageSize, total)
-	h.responder.Pagination(ctx, http.StatusOK, "{{.Name}}s_listed", v1dto.New{{.Pascal}}ResponseList(items), meta)
+	h.responder.Pagination(ctx, http.StatusOK, "{{.Plural}}_listed", v1dto.New{{.Pascal}}ResponseList(items), meta)
 }
 
 // Update{{.Pascal}} handles PATCH /{{.Plural}}/:uuid.
@@ -865,27 +813,32 @@ func (h *{{.Pascal}}Handler) Delete{{.Pascal}}(ctx *gin.Context) {
 const routerTmpl = `package v1
 
 import (
+	"net/http"
+
 	"github.com/gin-gonic/gin"
 
-	"github.com/jun-develop/junkit/response"
+	"github.com/jun-develop/junkit/apidoc"
 
-	authdomain "{{.Module}}/internal/features/auth/domain"
 	"{{.Module}}/internal/features/{{.Name}}/domain"
+	v1dto "{{.Module}}/internal/features/{{.Name}}/dto/v1"
 	v1handler "{{.Module}}/internal/features/{{.Name}}/handler/v1"
 	"{{.Module}}/internal/middleware"
 )
 
 // {{.Pascal}}Routes registers the {{.Name}} feature's endpoints under a version group.
 type {{.Pascal}}Routes struct {
-	handler       *v1handler.{{.Pascal}}Handler
-	authenticator middleware.Authenticator[*authdomain.Identity]
-	guard         *middleware.Guard
-	responder     response.Responder
+	handler      *v1handler.{{.Pascal}}Handler
+	authenticate middleware.Authenticate
+	guard        *middleware.Guard
 }
 
 // New{{.Pascal}}Routes creates a {{.Pascal}}Routes.
-func New{{.Pascal}}Routes(handler *v1handler.{{.Pascal}}Handler, authenticator middleware.Authenticator[*authdomain.Identity], guard *middleware.Guard, responder response.Responder) *{{.Pascal}}Routes {
-	return &{{.Pascal}}Routes{handler: handler, authenticator: authenticator, guard: guard, responder: responder}
+func New{{.Pascal}}Routes(
+	handler *v1handler.{{.Pascal}}Handler,
+	authenticate middleware.Authenticate,
+	guard *middleware.Guard,
+) *{{.Pascal}}Routes {
+	return &{{.Pascal}}Routes{handler: handler, authenticate: authenticate, guard: guard}
 }
 
 // Version implements router.Versioned; routes are nested under "/api/v1".
@@ -895,14 +848,26 @@ func (r *{{.Pascal}}Routes) Version() string {
 
 // Register implements router.Routes; every route requires a logged-in user holding its permission.
 func (r *{{.Pascal}}Routes) Register(group *gin.RouterGroup) {
-	items := group.Group("/{{.Plural}}")
-	items.Use(middleware.BearerAuth(r.authenticator, r.responder, middleware.BearerAuthOptions{}))
+	{{.Camel}}Group := group.Group("/{{.Plural}}", gin.HandlerFunc(r.authenticate))
 
-	items.POST("", r.guard.Can(r.handler.Create{{.Pascal}}, domain.{{.Pascal}}sCreate))
-	items.GET("", r.guard.Can(r.handler.List{{.Pascal}}s, domain.{{.Pascal}}sRead))
-	items.GET("/:uuid", r.guard.Can(r.handler.Get{{.Pascal}}, domain.{{.Pascal}}sRead))
-	items.PATCH("/:uuid", r.guard.Can(r.handler.Update{{.Pascal}}, domain.{{.Pascal}}sUpdate))
-	items.DELETE("/:uuid", r.guard.Can(r.handler.Delete{{.Pascal}}, domain.{{.Pascal}}sDelete))
+	{{.Camel}}Group.POST("", r.guard.Can(r.handler.Create{{.Pascal}}, domain.PASCAL_PLURALCreate))
+	{{.Camel}}Group.GET("", r.guard.Can(r.handler.ListPASCAL_PLURAL, domain.PASCAL_PLURALRead))
+	{{.Camel}}Group.GET("/:uuid", r.guard.Can(r.handler.Get{{.Pascal}}, domain.PASCAL_PLURALRead))
+	{{.Camel}}Group.PATCH("/:uuid", r.guard.Can(r.handler.Update{{.Pascal}}, domain.PASCAL_PLURALUpdate))
+	{{.Camel}}Group.DELETE("/:uuid", r.guard.Can(r.handler.Delete{{.Pascal}}, domain.PASCAL_PLURALDelete))
+}
+
+// Docs implements router.Documented; it describes every route Register adds (the API docs at /docs).
+func (r *{{.Pascal}}Routes) Docs() []apidoc.Route {
+	item := v1dto.{{.Pascal}}Response{}
+
+	return []apidoc.Route{
+		{Method: http.MethodPost, Path: "/{{.Plural}}", Summary: "Create a {{.Name}}", Body: v1dto.Create{{.Pascal}}Request{}, Status: http.StatusCreated, Response: item},
+		{Method: http.MethodGet, Path: "/{{.Plural}}", Summary: "List {{.Plural}}", Query: v1dto.ListPASCAL_PLURALRequest{}, Response: item, Paginated: true},
+		{Method: http.MethodGet, Path: "/{{.Plural}}/:uuid", Summary: "Get a {{.Name}}", Response: item},
+		{Method: http.MethodPatch, Path: "/{{.Plural}}/:uuid", Summary: "Update a {{.Name}}", Body: v1dto.Update{{.Pascal}}Request{}, Response: item},
+		{Method: http.MethodDelete, Path: "/{{.Plural}}/:uuid", Summary: "Delete a {{.Name}}"},
+	}
 }
 `
 
@@ -911,7 +876,6 @@ const moduleTmpl = `package {{.Name}}
 import (
 	"go.uber.org/fx"
 
-	"github.com/jun-develop/junkit/cache"
 	"github.com/jun-develop/junkit/i18n"
 
 	"{{.Module}}/internal/features/{{.Name}}/domain"
@@ -930,19 +894,17 @@ var Module = fx.Module("{{.Name}}",
 			fx.As(new(domain.{{.Pascal}}Repository)),
 		),
 	),
-	fx.Provide(func(opts cache.Options) cache.Cache[*domain.{{.Pascal}}] {
-		return cache.New[*domain.{{.Pascal}}](opts)
-	}),
 	fx.Provide(
 		fx.Annotate(
 			service.New{{.Pascal}}Service,
 			fx.As(new(domain.{{.Pascal}}Service)),
 		),
 	),
+	// Permission codes this feature checks; AccessService receives every feature's codes.
 	fx.Provide(
 		fx.Annotate(
 			func() []string { return domain.Permissions },
-			fx.ResultTags({{"` + "`" + `"}}group:"permissions,flatten"{{"` + "`" + `"}}),
+			fx.ResultTags(@@group:"permissions,flatten"@@),
 		),
 	),
 	fx.Provide(v1handler.New{{.Pascal}}Handler),
@@ -950,12 +912,12 @@ var Module = fx.Module("{{.Name}}",
 		fx.Annotate(
 			v1route.New{{.Pascal}}Routes,
 			fx.As(new(router.Routes)),
-			fx.ResultTags({{"` + "`" + `"}}group:"routes"{{"` + "`" + `"}}),
+			fx.ResultTags(@@group:"routes"@@),
 		),
 	),
 
 	// =============================================================================
-	// COMMANDS
+	// COMMANDS (make command ... FEATURE={{.Name}} inserts here; keep this marker)
 	// =============================================================================
 
 	fx.Invoke(registerTranslations),
@@ -971,12 +933,12 @@ func registerTranslations(translator *i18n.Translator) {
 			"permission.{{.Plural}}.update": "Update PLURAL_WORDS",
 			"permission.{{.Plural}}.delete": "Delete PLURAL_WORDS",
 
-			"{{.Name}}_not_found": "{{.Pascal}} not found",
-			"{{.Name}}_created":   "{{.Pascal}} created successfully",
-			"{{.Name}}_retrieved": "{{.Pascal}} retrieved successfully",
-			"{{.Name}}s_listed":   "{{.Pascal}}s listed successfully",
-			"{{.Name}}_updated":   "{{.Pascal}} updated successfully",
-			"{{.Name}}_deleted":   "{{.Pascal}} deleted successfully",
+			"{{.Name}}_not_found": "NAME_WORDS not found",
+			"{{.Name}}_created":   "NAME_WORDS created successfully",
+			"{{.Name}}_retrieved": "NAME_WORDS retrieved successfully",
+			"{{.Plural}}_listed":  "PLURAL_TITLE listed successfully",
+			"{{.Name}}_updated":   "NAME_WORDS updated successfully",
+			"{{.Name}}_deleted":   "NAME_WORDS deleted successfully",
 		},
 	})
 }

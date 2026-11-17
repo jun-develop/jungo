@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"reflect"
+	"unsafe"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -33,8 +33,8 @@ type PermissionCarrier interface {
 	Permissions() (codes []string, ok bool)
 }
 
-// Guard wraps route handlers with a permission policy. Every route under a versioned API group
-// must be wrapped by Can, Authenticated or Public (enforced by router.RegisterAll via Guards).
+// Guard wraps route handlers with a permission policy. Every route under /api must be wrapped by
+// Can, Authenticated, Public or Internal (enforced by router.RegisterAll via Policy).
 //
 // Usage:
 //
@@ -44,14 +44,31 @@ type Guard struct {
 	loader    PermissionLoader
 	responder response.Responder
 
-	// wrapped holds the code pointer of every handler Guard returned. Written only while routes
-	// register at startup; read by Guards afterwards.
-	wrapped map[uintptr]bool
+	// policies holds the Policy of every handler Guard returned. Written only while routes register
+	// at startup; read by Policy afterwards.
+	policies map[uintptr]Policy
+}
+
+// PolicyKind is how Guard protects a route.
+type PolicyKind int
+
+// Policy kinds, one per Guard method.
+const (
+	PolicyPermission PolicyKind = iota + 1
+	PolicyAuthenticated
+	PolicyPublic
+	PolicyInternal
+)
+
+// Policy is how one route is protected: its kind and, for PolicyPermission, the codes it needs.
+type Policy struct {
+	Kind        PolicyKind
+	Permissions []string
 }
 
 // NewGuard creates a Guard.
 func NewGuard(loader PermissionLoader, responder response.Responder) *Guard {
-	return &Guard{loader: loader, responder: responder, wrapped: make(map[uintptr]bool)}
+	return &Guard{loader: loader, responder: responder, policies: make(map[uintptr]Policy)}
 }
 
 // Can allows the request when the identity holds every permission in perms. It panics at route
@@ -67,8 +84,8 @@ func (g *Guard) Can(h gin.HandlerFunc, perms ...string) gin.HandlerFunc {
 		}
 	}
 
-	return g.mark(func(c *gin.Context) {
-		a, ok := g.actor(c)
+	return g.mark(Policy{Kind: PolicyPermission, Permissions: perms}, func(c *gin.Context) {
+		a, ok := g.loadActor(c)
 		if !ok {
 			return
 		}
@@ -89,8 +106,8 @@ func (g *Guard) Can(h gin.HandlerFunc, perms ...string) gin.HandlerFunc {
 // Authenticated allows any authenticated identity; the service checks ownership via
 // actor.RequireSelfOrPermission.
 func (g *Guard) Authenticated(h gin.HandlerFunc) gin.HandlerFunc {
-	return g.mark(func(c *gin.Context) {
-		if _, ok := g.actor(c); ok {
+	return g.mark(Policy{Kind: PolicyAuthenticated}, func(c *gin.Context) {
+		if _, ok := g.loadActor(c); ok {
 			h(c)
 		}
 	})
@@ -98,14 +115,21 @@ func (g *Guard) Authenticated(h gin.HandlerFunc) gin.HandlerFunc {
 
 // Public marks a route that needs no authentication.
 func (g *Guard) Public(h gin.HandlerFunc) gin.HandlerFunc {
-	return g.mark(func(c *gin.Context) {
+	return g.mark(Policy{Kind: PolicyPublic}, func(c *gin.Context) {
 		h(c)
 	})
 }
 
-// actor loads the identity's permissions and stores the Actor in the request context. It answers
+// Internal marks a service-to-service route whose group checks the caller itself (RequireSecret).
+func (g *Guard) Internal(h gin.HandlerFunc) gin.HandlerFunc {
+	return g.mark(Policy{Kind: PolicyInternal}, func(c *gin.Context) {
+		h(c)
+	})
+}
+
+// loadActor loads the identity's permissions and stores the Actor in the request context. It answers
 // the request itself and returns false when that fails.
-func (g *Guard) actor(c *gin.Context) (*actor.Actor, bool) {
+func (g *Guard) loadActor(c *gin.Context) (*actor.Actor, bool) {
 	subject, ok := security.GetIdentity[Subject](c)
 	if !ok {
 		// The route is missing BearerAuth; fail closed.
@@ -140,15 +164,22 @@ func (g *Guard) permissions(ctx context.Context, subject Subject) ([]string, err
 	return g.loader.Permissions(ctx, subject.SubjectID())
 }
 
-// Guards reports whether h (gin.RouteInfo.HandlerFunc) was returned by Can, Authenticated or Public.
-func (g *Guard) Guards(h gin.HandlerFunc) bool {
-	return g.wrapped[reflect.ValueOf(h).Pointer()]
+// Policy returns how h (gin.RouteInfo.HandlerFunc) is protected; ok is false when h was not
+// returned by Can, Authenticated, Public or Internal.
+func (g *Guard) Policy(h gin.HandlerFunc) (p Policy, ok bool) {
+	p, ok = g.policies[closureID(h)]
+	return p, ok
 }
 
-// mark records h as a Guard handler. Every closure built from one func literal shares its code
-// pointer, so the map ends up with one key per wrapper (Can, Authenticated, Public); a handler not
-// returned by Guard has another pointer. permission_test.go checks this still holds.
-func (g *Guard) mark(h gin.HandlerFunc) gin.HandlerFunc {
-	g.wrapped[reflect.ValueOf(h).Pointer()] = true
+// mark records h's policy.
+func (g *Guard) mark(p Policy, h gin.HandlerFunc) gin.HandlerFunc {
+	g.policies[closureID(h)] = p
 	return h
+}
+
+// closureID identifies one closure: a func value points to its closure object, allocated per Guard
+// call (it captures h), so each route gets its own key. reflect's Pointer would return the code
+// pointer, shared by every closure of one func literal.
+func closureID(h gin.HandlerFunc) uintptr {
+	return *(*uintptr)(unsafe.Pointer(&h))
 }

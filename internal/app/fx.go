@@ -31,6 +31,7 @@ import (
 	"jungo/internal/features/access"
 	"jungo/internal/features/auth"
 	"jungo/internal/features/user"
+	"jungo/internal/middleware"
 	"jungo/internal/router"
 )
 
@@ -63,8 +64,8 @@ func CoreModules(cfg *config.Config) []fx.Option {
 			primary.Module,
 		),
 
-		fx.Provide(provideResponseOptions),
 		i18n.Module,
+		fx.Invoke(func(t *i18n.Translator) { t.SetDefaultLang(cfg.Language) }),
 		response.Module,
 
 		fx.Provide(provideValidationOptions),
@@ -115,23 +116,24 @@ func HTTPModules() []fx.Option {
 	return []fx.Option{
 		fx.Provide(provideGin),
 
-		fx.Provide(router.Module),
+		fx.Provide(middleware.NewGuard),
 		fx.Invoke(router.RegisterAll),
+		access.PermissionCheck,
 
 		fx.Provide(NewApp),
 		fx.Invoke((*App).Run),
 	}
 }
 
-// GetFxOptions returns all Fx options configured for the API server.
-func GetFxOptions(cfg *config.Config) []fx.Option {
+// FxOptions returns all Fx options configured for the API server.
+func FxOptions(cfg *config.Config) []fx.Option {
 	return append(CoreModules(cfg), HTTPModules()...)
 }
 
 // NewAPIFx initializes and assembles the full API server Fx application.
 func NewAPIFx() *fx.App {
 	cfg := config.NewConfig()
-	return fx.New(GetFxOptions(cfg)...)
+	return fx.New(FxOptions(cfg)...)
 }
 
 // NewConsoleFx assembles the Fx application for running a single CLI command. Logs go to files
@@ -141,7 +143,6 @@ func NewConsoleFx() *fx.App {
 	verbose, debug := consoleFlags()
 
 	opts := []fx.Option{
-		fx.Provide(console.Module),
 		fx.Invoke(console.RunSelected),
 	}
 
@@ -191,9 +192,11 @@ func fxErrorsOnly() fx.Option {
 	})
 }
 
-// provideGin initializes the Gin engine with trusted proxies
+// provideGin initializes the Gin engine with trusted proxies.
 func provideGin(cfg *config.Config) (*gin.Engine, error) {
 	r := gin.New()
+	// security.GetIdentity(c) reads the request context through *gin.Context.
+	r.ContextWithFallback = true
 	if err := r.SetTrustedProxies(cfg.Security.TrustedProxies); err != nil {
 		return nil, fmt.Errorf("SECURITY_TRUSTED_PROXIES: %w", err)
 	}
@@ -222,15 +225,10 @@ func provideLoggers(cfg *config.Config) []fx.Option {
 	return logger.ProvideNamed(defs, shared)
 }
 
-// provideResponseOptions builds response.Options from cfg.
-func provideResponseOptions(cfg *config.Config) response.Options {
-	return response.Options{Language: cfg.Language}
-}
-
-// provideValidationOptions builds validation.Options from cfg.
-func provideValidationOptions(cfg *config.Config) validation.Options {
-	validation.DefaultBlocklistPath = cfg.StoragePath("bootstrap", "email_blocklist.conf")
-	return validation.Options{Language: cfg.Language}
+// provideValidationOptions builds validation.Options; the disposable-email blocklist is the
+// embedded seed.
+func provideValidationOptions() validation.Options {
+	return validation.Options{}
 }
 
 // provideSecurityOptions builds security.Options from cfg.Auth; development falls back
@@ -287,7 +285,7 @@ func provideTelegramOptions(cfg *config.Config) telegram.Options {
 
 // provideNotificationOptions routes notifications to the configured Telegram chat.
 func provideNotificationOptions(cfg *config.Config) notification.Options {
-	return notification.Options{TelegramChatID: cfg.Telegram.ChatID, Environment: cfg.Environment}
+	return notification.Options{TelegramChatID: cfg.Telegram.ChatID, Enabled: cfg.Environment == "production"}
 }
 
 // provideMailerOptions builds mailer.Options from cfg.Mail; warns when the log driver runs outside development.
@@ -305,6 +303,8 @@ func provideMailerOptions(cfg *config.Config, log *zap.Logger) mailer.Options {
 			Port:     m.SMTPPort,
 			Username: m.SMTPUsername,
 			Password: m.SMTPPassword,
+			// Only for a local server without TLS, such as Mailpit.
+			AllowPlaintext: m.SMTPAllowPlaintext,
 		},
 		Brevo: mailer.BrevoOptions{APIKey: m.BrevoAPIKey},
 	}

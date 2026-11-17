@@ -4,9 +4,12 @@ tmp_dir = "tmp"
 [build]
 cmd = "go build -o tmp/api ./cmd/api"
 bin = "tmp/api"
-include_ext = ["go"]
+include_ext = ["go", "html", "txt", "sql"]
 exclude_dir = ["tmp", "bin", "storage", "deploy"]
 delay = 1000
+# Restart the app when it exits (e.g. started before the database was ready) instead of waiting for a file change.
+rerun = true
+rerun_delay = 3000
 poll = true
 poll_interval = 1000
 

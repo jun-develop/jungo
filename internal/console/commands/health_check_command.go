@@ -9,8 +9,7 @@ import (
 	"jungo/internal/database/primary"
 )
 
-// HealthCheckCommand pings the database and reports the current row count
-// for the users table.
+// HealthCheckCommand pings the database and reports the number of users.
 //
 // Usage:
 //
@@ -30,7 +29,7 @@ func (c *HealthCheckCommand) Signature() string {
 }
 
 // Run implements console.Command.
-func (c *HealthCheckCommand) Run(ctx context.Context, args []string) error {
+func (c *HealthCheckCommand) Run(ctx context.Context, _ []string) error {
 	if err := c.db.Ping(ctx); err != nil {
 		return fmt.Errorf("ping database: %w", err)
 	}

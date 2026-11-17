@@ -12,17 +12,17 @@ import (
 	"jungo/internal/features/auth/domain"
 )
 
-// SessionCache implements domain.SessionCache on a cache.Invalidatable whose marker is the
-// session's family: invalidating a family makes every cached session of it a miss.
+// SessionCache implements domain.SessionCache on a cache.Invalidatable whose markers are the
+// session's family and its user: invalidating either makes every cached session under it a miss.
 type SessionCache struct {
 	sessions *cache.Invalidatable[*domain.Session]
 	logger   *zap.Logger
 }
 
 // NewSessionCache creates a SessionCache using the app's cache driver.
-func NewSessionCache(opts cache.Options, cfg *config.Config, logger *zap.Logger) *SessionCache {
+func NewSessionCache(s *cache.Store, cfg *config.Config, logger *zap.Logger) *SessionCache {
 	return &SessionCache{
-		sessions: cache.NewInvalidatable[*domain.Session](opts, cfg.Auth.SessionCacheTTL),
+		sessions: cache.NewInvalidatable[*domain.Session](s, cfg.Auth.SessionCacheTTL),
 		logger:   logger,
 	}
 }
@@ -35,7 +35,7 @@ func (c *SessionCache) GetOrLoad(ctx context.Context, hash string, load func() (
 			return nil
 		}
 
-		return []string{familyKey(s.FamilyUUID)}
+		return []string{familyKey(s.FamilyUUID), userKey(s.UserUUID)}
 	}, load)
 	if err != nil || !hit || session == nil {
 		return session, err
@@ -62,6 +62,14 @@ func (c *SessionCache) InvalidateFamilies(ctx context.Context, familyUUIDs ...uu
 	}
 }
 
+// InvalidateUser implements domain.SessionCache; it marks every cached session of the user stale,
+// e.g. after their profile changed. A missed marker keeps them valid until their TTL.
+func (c *SessionCache) InvalidateUser(ctx context.Context, userUUID uuid.UUID) {
+	if err := c.sessions.Invalidate(ctx, userKey(userUUID)); err != nil {
+		c.logger.Error("session cache: invalidate user failed", zap.String("user_uuid", userUUID.String()), zap.Error(err))
+	}
+}
+
 // sessionKey returns the cache key for the session of a token hash.
 func sessionKey(hash string) string {
 	return "auth:session:" + hash + ":entry"
@@ -70,4 +78,9 @@ func sessionKey(hash string) string {
 // familyKey returns the cache key for a family's invalidation marker.
 func familyKey(familyUUID uuid.UUID) string {
 	return "auth:family:" + familyUUID.String() + ":invalidated_at"
+}
+
+// userKey returns the cache key for a user's invalidation marker.
+func userKey(userUUID uuid.UUID) string {
+	return "auth:user:" + userUUID.String() + ":invalidated_at"
 }

@@ -3,9 +3,9 @@ package service
 import (
 	"context"
 	"errors"
-	"slices"
 
 	"github.com/google/uuid"
+	"go.uber.org/fx"
 	"go.uber.org/zap"
 
 	"github.com/jun-develop/junkit/security"
@@ -16,10 +16,22 @@ import (
 	"jungo/internal/features/user/domain"
 )
 
-// UserService implements domain.UserService.
+// UserServiceParams defines dependencies for UserService.
+type UserServiceParams struct {
+	fx.In
+
+	Repo        domain.UserRepository
+	Permissions actor.TargetPermissionReader
+	Storage     storage.Service
+	Hasher      security.PasswordHasher
+	Sessions    domain.SessionRevoker
+	Logger      *zap.Logger
+}
+
+// UserService implements domain.UserService and domain.CredentialStore.
 type UserService struct {
 	repo        domain.UserRepository
-	permissions domain.PermissionReader
+	permissions actor.TargetPermissionReader
 	storage     storage.Service
 	hasher      security.PasswordHasher
 	sessions    domain.SessionRevoker
@@ -27,18 +39,23 @@ type UserService struct {
 }
 
 // NewUserService creates a UserService.
-func NewUserService(repo domain.UserRepository, permissions domain.PermissionReader, storageService storage.Service, hasher security.PasswordHasher, sessions domain.SessionRevoker, logger *zap.Logger) *UserService {
-	return &UserService{repo: repo, permissions: permissions, storage: storageService, hasher: hasher, sessions: sessions, logger: logger}
+func NewUserService(p UserServiceParams) *UserService {
+	return &UserService{
+		repo:        p.Repo,
+		permissions: p.Permissions,
+		storage:     p.Storage,
+		hasher:      p.Hasher,
+		sessions:    p.Sessions,
+		logger:      p.Logger,
+	}
 }
 
-// CreateUser creates a new user with hashed password.
-//
-// Flow: normalize email -> hash password -> persist user
+// CreateUser creates a new user with a hashed password; the route requires users:create.
 func (s *UserService) CreateUser(ctx context.Context, input domain.CreateUserInput) (*domain.User, error) {
 	input.Email = domain.NormalizeEmail(input.Email)
 
 	stop := tracer.Span(ctx, "Bcrypt Hashing")
-	passwordHash, err := s.hasher.Hash(input.Password)
+	passwordHash, err := s.hasher.Hash(ctx, input.Password)
 	stop()
 	if err != nil {
 		if errors.Is(err, security.ErrPasswordTooLong) {
@@ -61,26 +78,27 @@ func (s *UserService) GetUser(ctx context.Context, uid uuid.UUID) (*domain.User,
 	return s.repo.GetByUUID(ctx, uid)
 }
 
-// GetCredentialsByEmail returns the login credentials of the user with email.
+// GetCredentialsByEmail implements domain.CredentialStore.
 func (s *UserService) GetCredentialsByEmail(ctx context.Context, email string) (*domain.Credentials, error) {
 	return s.repo.GetCredentialsByEmail(ctx, domain.NormalizeEmail(email))
 }
 
-// SetPasswordHash replaces a user's password hash without an authorization check; callers (the
-// auth feature's password reset) must have verified the request themselves.
-func (s *UserService) SetPasswordHash(ctx context.Context, id int64, passwordHash string) error {
-	return s.repo.UpdatePassword(ctx, id, passwordHash)
+// SetPasswordHash implements domain.CredentialStore; the caller (the auth feature's password reset)
+// has verified the request itself.
+func (s *UserService) SetPasswordHash(ctx context.Context, userID int64, passwordHash string) error {
+	return s.repo.UpdatePassword(ctx, userID, passwordHash)
 }
 
-// GetUsers returns a paginated list of users.
-func (s *UserService) GetUsers(ctx context.Context, filter domain.UserListFilter) ([]*domain.User, int64, error) {
+// ListUsers returns a page of users; the route requires users:read.
+func (s *UserService) ListUsers(ctx context.Context, filter domain.UserListFilter) ([]*domain.User, int64, error) {
 	return s.repo.List(ctx, filter)
 }
 
 // UpdateUser updates a user. The user themself may change everything but their status; anyone
-// else is checked by authorize with users:update.
+// else is checked by authorize with users:update. A user made inactive loses their sessions in the
+// same transaction, so the change and the logout cannot half happen.
 //
-// Flow: authorize + update (tx) -> revoke sessions if no longer active
+// Flow: authorize + update + revoke sessions if inactive (tx) -> drop cached sessions
 func (s *UserService) UpdateUser(ctx context.Context, uid uuid.UUID, input domain.UpdateUserInput) (*domain.User, error) {
 	var user *domain.User
 	err := s.repo.WithTransaction(ctx, func(ctx context.Context) error {
@@ -93,27 +111,29 @@ func (s *UserService) UpdateUser(ctx context.Context, uid uuid.UUID, input domai
 			return domain.ErrCannotChangeOwnStatus
 		}
 
-		user, err = s.repo.Update(ctx, uid, input)
+		if user, err = s.repo.Update(ctx, uid, input); err != nil {
+			return err
+		}
 
-		return err
+		if user.IsActive() {
+			return nil
+		}
+
+		return s.sessions.RevokeUserSessions(ctx, uid)
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	if !user.IsActive() {
-		if err := s.revokeSessions(ctx, uid); err != nil {
-			return nil, err
-		}
-	}
+	s.sessions.InvalidateUserSessions(ctx, uid)
 
 	return user, nil
 }
 
-// DeleteUser deletes another user, checked by authorize with users:delete, and removes their
-// avatar file. No one deletes themself, so the last super_admin always stays.
+// DeleteUser deletes another user, checked by authorize with users:delete, ends their sessions and
+// removes their avatar file. No one deletes themself, so the last super_admin always stays.
 //
-// Flow: authorize + get user + soft-delete (tx) -> revoke sessions -> delete avatar file
+// Flow: authorize + get user + soft-delete + revoke sessions (tx) -> drop cached sessions -> delete avatar file
 func (s *UserService) DeleteUser(ctx context.Context, uid uuid.UUID) error {
 	var user *domain.User
 	err := s.repo.WithTransaction(ctx, func(ctx context.Context) error {
@@ -130,15 +150,17 @@ func (s *UserService) DeleteUser(ctx context.Context, uid uuid.UUID) error {
 			return err
 		}
 
-		return s.repo.Delete(ctx, uid)
+		if err := s.repo.Delete(ctx, uid); err != nil {
+			return err
+		}
+
+		return s.sessions.RevokeUserSessions(ctx, uid)
 	})
 	if err != nil {
 		return err
 	}
 
-	if err := s.revokeSessions(ctx, uid); err != nil {
-		return err
-	}
+	s.sessions.InvalidateUserSessions(ctx, uid)
 
 	if hasAvatar(user) {
 		s.deleteFile(ctx, *user.AvatarURL)
@@ -149,16 +171,12 @@ func (s *UserService) DeleteUser(ctx context.Context, uid uuid.UUID) error {
 
 // UploadAvatar uploads a new avatar and updates the user record, for the user themself or anyone
 // authorize allows with users:update. The upload runs outside the transaction so the row is not
-// kept locked during it; authorize runs again inside, in case the user's roles changed meanwhile.
+// kept locked during it; inside, authorize runs again (the user's roles may have changed) and the
+// old avatar is read under the row lock, so two uploads at once cannot orphan a file.
 //
-// Flow: authorize -> get user -> upload file -> authorize + update avatar URL (tx) -> delete old file
+// Flow: authorize -> upload file -> authorize + lock + read old avatar + update (tx) -> drop cached sessions -> delete old file
 func (s *UserService) UploadAvatar(ctx context.Context, uid uuid.UUID, file domain.AvatarFile) (*domain.User, error) {
 	if _, err := s.authorize(ctx, uid, domain.UsersUpdate); err != nil {
-		return nil, err
-	}
-
-	user, err := s.repo.GetByUUID(ctx, uid)
-	if err != nil {
 		return nil, err
 	}
 
@@ -169,9 +187,10 @@ func (s *UserService) UploadAvatar(ctx context.Context, uid uuid.UUID, file doma
 		return nil, domain.ErrInvalidAvatarFile
 	}
 
-	var updated *domain.User
+	var previous, updated *domain.User
 	err = s.repo.WithTransaction(ctx, func(ctx context.Context) error {
-		if _, err := s.authorize(ctx, uid, domain.UsersUpdate); err != nil {
+		var err error
+		if previous, err = s.lockForUpdate(ctx, uid); err != nil {
 			return err
 		}
 
@@ -184,8 +203,10 @@ func (s *UserService) UploadAvatar(ctx context.Context, uid uuid.UUID, file doma
 		return nil, err
 	}
 
-	if hasAvatar(user) {
-		s.deleteFile(ctx, *user.AvatarURL)
+	s.sessions.InvalidateUserSessions(ctx, uid)
+
+	if hasAvatar(previous) {
+		s.deleteFile(ctx, *previous.AvatarURL)
 	}
 
 	return updated, nil
@@ -194,17 +215,17 @@ func (s *UserService) UploadAvatar(ctx context.Context, uid uuid.UUID, file doma
 // DeleteAvatar clears the avatar URL, then removes the file, for the user themself or anyone
 // authorize allows with users:update.
 //
-// Flow: authorize + get user + clear avatar URL (tx) -> delete file
+// Flow: authorize + lock + read avatar + clear it (tx) -> drop cached sessions -> delete file
 func (s *UserService) DeleteAvatar(ctx context.Context, uid uuid.UUID) (*domain.User, error) {
-	var user, updated *domain.User
+	var previous, updated *domain.User
 	err := s.repo.WithTransaction(ctx, func(ctx context.Context) error {
-		if _, err := s.authorize(ctx, uid, domain.UsersUpdate); err != nil {
+		var err error
+		if previous, err = s.lockForUpdate(ctx, uid); err != nil {
 			return err
 		}
 
-		var err error
-		if user, err = s.repo.GetByUUID(ctx, uid); err != nil || !hasAvatar(user) {
-			return err
+		if !hasAvatar(previous) {
+			return nil
 		}
 
 		empty := ""
@@ -216,13 +237,28 @@ func (s *UserService) DeleteAvatar(ctx context.Context, uid uuid.UUID) (*domain.
 		return nil, err
 	}
 
-	if !hasAvatar(user) {
-		return user, nil
+	if !hasAvatar(previous) {
+		return previous, nil
 	}
 
-	s.deleteFile(ctx, *user.AvatarURL)
+	s.sessions.InvalidateUserSessions(ctx, uid)
+	s.deleteFile(ctx, *previous.AvatarURL)
 
 	return updated, nil
+}
+
+// lockForUpdate authorizes a change to user uid with users:update, locks their row until the
+// transaction in ctx ends and returns them as they are now.
+func (s *UserService) lockForUpdate(ctx context.Context, uid uuid.UUID) (*domain.User, error) {
+	if _, err := s.authorize(ctx, uid, domain.UsersUpdate); err != nil {
+		return nil, err
+	}
+
+	if _, err := s.repo.LockByUUID(ctx, uid); err != nil {
+		return nil, err
+	}
+
+	return s.repo.GetByUUID(ctx, uid)
 }
 
 // authorize checks the actor may act on user uid and reports whether uid is the actor. Acting on
@@ -249,17 +285,8 @@ func (s *UserService) authorize(ctx context.Context, uid uuid.UUID, permission s
 		return false, err
 	}
 
-	held, target, err := s.permissions.GetActorAndTargetPermissions(ctx, a.UserID, targetID)
-	if err != nil {
+	if _, err := actor.RequireManage(ctx, s.permissions, targetID, permission); err != nil {
 		return false, err
-	}
-
-	if !slices.Contains(held, permission) {
-		return false, actor.ErrForbidden
-	}
-
-	if !actor.Covers(held, target) {
-		return false, domain.ErrCannotManageStrongerUser
 	}
 
 	return false, nil
@@ -276,14 +303,4 @@ func (s *UserService) deleteFile(ctx context.Context, fileURL string) {
 	if err := s.storage.DeleteFile(ctx, fileURL); err != nil {
 		s.logger.Error("user: delete stored file failed", zap.String("file_url", fileURL), zap.Error(err))
 	}
-}
-
-// revokeSessions ends the user's sessions. Its error is returned: until revoked, a cached session
-// keeps the user's old active status for up to AUTH_SESSION_CACHE_TTL.
-func (s *UserService) revokeSessions(ctx context.Context, uid uuid.UUID) error {
-	if s.sessions == nil {
-		return nil
-	}
-
-	return s.sessions.RevokeUserSessions(ctx, uid)
 }

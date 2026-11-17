@@ -23,9 +23,9 @@ type PermissionCache struct {
 }
 
 // NewPermissionCache creates a PermissionCache using the app's cache driver.
-func NewPermissionCache(opts cache.Options, cfg *config.Config, logger *zap.Logger) *PermissionCache {
+func NewPermissionCache(s *cache.Store, cfg *config.Config, logger *zap.Logger) *PermissionCache {
 	return &PermissionCache{
-		entries: cache.NewInvalidatable[[]string](opts, cfg.Auth.PermissionCacheTTL),
+		entries: cache.NewInvalidatable[[]string](s, cfg.Auth.PermissionCacheTTL),
 		logger:  logger,
 	}
 }

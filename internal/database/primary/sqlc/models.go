@@ -26,7 +26,7 @@ type AuthToken struct {
 	DeviceID  *string     `db:"device_id" json:"device_id"`
 	ExpiresAt time.Time   `db:"expires_at" json:"expires_at"`
 	RevokedAt *time.Time  `db:"revoked_at" json:"revoked_at"`
-	// logout | refresh | reuse | rotated | admin | user_disabled
+	// logout | refresh | reuse | rotated | admin | user_disabled | password_reset
 	RevokedReason *string    `db:"revoked_reason" json:"revoked_reason"`
 	CreatedAt     time.Time  `db:"created_at" json:"created_at"`
 	UpdatedAt     *time.Time `db:"updated_at" json:"updated_at"`
@@ -54,7 +54,7 @@ type Role struct {
 	UUID uuid.UUID `db:"uuid" json:"uuid"`
 	Code string    `db:"code" json:"code"`
 	Name string    `db:"name" json:"name"`
-	// System roles cannot be changed through the API; super_admin is granted every permission by seeders/002_access.sql
+	// System roles cannot be changed through the API; super_admin is granted every permission by the migrations
 	IsSystem  bool       `db:"is_system" json:"is_system"`
 	CreatedAt time.Time  `db:"created_at" json:"created_at"`
 	UpdatedAt *time.Time `db:"updated_at" json:"updated_at"`

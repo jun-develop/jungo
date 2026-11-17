@@ -13,6 +13,13 @@ var Module = fx.Options(
 	// =============================================================================
 	fx.Provide(
 		fx.Annotate(
+			NewMigrateCommand,
+			fx.As(new(console.Command)),
+			fx.ResultTags(`group:"commands"`),
+		),
+	),
+	fx.Provide(
+		fx.Annotate(
 			NewHealthCheckCommand,
 			fx.As(new(console.Command)),
 			fx.ResultTags(`group:"commands"`),

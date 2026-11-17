@@ -4,6 +4,7 @@ import (
 	"go.uber.org/fx"
 
 	"github.com/jun-develop/junkit/i18n"
+	"github.com/jun-develop/junkit/response"
 
 	"jungo/internal/console"
 	"jungo/internal/features/auth/adapter"
@@ -15,7 +16,6 @@ import (
 	privateroute "jungo/internal/features/auth/router/private"
 	v1route "jungo/internal/features/auth/router/v1"
 	"jungo/internal/features/auth/service"
-	userdomain "jungo/internal/features/user/domain"
 	"jungo/internal/middleware"
 	"jungo/internal/router"
 )
@@ -33,6 +33,8 @@ var Module = fx.Module("auth",
 			infrastructure.NewSessionCache,
 			fx.As(new(domain.SessionCache)),
 		),
+	),
+	fx.Provide(
 		fx.Annotate(
 			infrastructure.NewLoginGuard,
 			fx.As(new(domain.LoginGuard)),
@@ -43,10 +45,6 @@ var Module = fx.Module("auth",
 			adapter.NewUserAdapter,
 			fx.As(new(domain.UserProvider)),
 		),
-		fx.Annotate(
-			adapter.NewSessionRevokerAdapter,
-			fx.As(new(userdomain.SessionRevoker)),
-		),
 	),
 	fx.Provide(
 		fx.Annotate(
@@ -54,7 +52,8 @@ var Module = fx.Module("auth",
 			fx.As(new(domain.AuthService)),
 		),
 	),
-	fx.Provide(newAccessAuthenticator),
+	// The bearer-token middleware every feature's router protects its routes with.
+	fx.Provide(newAuthenticate),
 	fx.Provide(v1handler.NewAuthHandler),
 	fx.Provide(
 		fx.Annotate(
@@ -62,6 +61,8 @@ var Module = fx.Module("auth",
 			fx.As(new(router.Routes)),
 			fx.ResultTags(`group:"routes"`),
 		),
+	),
+	fx.Provide(
 		fx.Annotate(
 			privateroute.NewAuthRoutes,
 			fx.As(new(router.Routes)),
@@ -70,7 +71,7 @@ var Module = fx.Module("auth",
 	),
 
 	// =============================================================================
-	// COMMANDS
+	// COMMANDS (make command ... FEATURE=auth inserts here; keep this marker)
 	// =============================================================================
 	fx.Provide(
 		fx.Annotate(
@@ -83,24 +84,29 @@ var Module = fx.Module("auth",
 	fx.Invoke(registerTranslations),
 )
 
-// newAccessAuthenticator exposes AuthService.AuthenticateAccess as a middleware.Authenticator.
-func newAccessAuthenticator(svc domain.AuthService) middleware.Authenticator[*domain.Identity] {
-	return middleware.AuthenticatorFunc[*domain.Identity](svc.AuthenticateAccess)
+// newAuthenticate builds the middleware that authenticates access tokens with AuthService.
+func newAuthenticate(svc domain.AuthService, responder response.Responder) middleware.Authenticate {
+	authenticator := middleware.AuthenticatorFunc[*domain.Identity](svc.AuthenticateAccess)
+	return middleware.Authenticate(middleware.BearerAuth(authenticator, responder))
 }
 
-// registerTranslations registers domain-specific translation messages.
+// registerTranslations registers this feature's messages.
 func registerTranslations(translator *i18n.Translator) {
 	translator.AddTranslations(map[string]map[string]string{
 		i18n.LangEN: {
-			"login_success":                    "Logged in successfully",
-			"refresh_success":                  "Token refreshed successfully",
-			"logout_success":                   "Logged out successfully",
-			"logout_all_success":               "Logged out from all sessions successfully",
+			"logged_in":                        "Logged in successfully",
+			"token_refreshed":                  "Token refreshed successfully",
+			"logged_out":                       "Logged out successfully",
+			"logged_out_all":                   "Logged out from all sessions successfully",
 			"profile_retrieved":                "Profile retrieved successfully",
 			"sessions_listed":                  "Sessions listed successfully",
 			"token_details_retrieved":          "Token details retrieved successfully",
-			"token_revoked_success":            "Token revoked successfully",
-			"tokens_revoked_all_success":       "All sessions of the user revoked successfully",
+			"session_revoked":                  "Session revoked successfully",
+			"sessions_revoked":                 "All sessions of the user revoked successfully",
+			"password_reset_requested":         "If an account exists for this email, a password reset link has been sent",
+			"password_reset_completed":         "Your password has been reset; please log in again",
+			"user_not_found":                   "User not found",
+			"password_too_long":                "Password is too long (max 72 bytes; accented characters count as more than one)",
 			"invalid_credentials":              "Invalid email or password",
 			"invalid_credentials_warning":      "Invalid email or password. Further failed attempts will temporarily block logins from your IP",
 			"user_account_is_not_active":       "Your account is not active",
@@ -113,11 +119,9 @@ func registerTranslations(translator *i18n.Translator) {
 			"token_revoked":                    "Token has been revoked",
 			"token_reused":                     "Refresh token was already used; the session has been revoked, please log in again",
 			"token_not_found":                  "Token not found",
-			"password_reset_requested":         "If an account exists for this email, a password reset link has been sent",
-			"password_reset_success":           "Your password has been reset; please log in again",
 			"invalid_reset_token":              "This password reset link is invalid or has expired",
 			"too_many_password_reset_requests": "Too many password reset requests, please try again later",
-			"password_reset_unavailable":       "Password reset is unavailable because email sending is not configured",
+			"password_reset_unavailable":       "Password reset is currently unavailable",
 		},
 	})
 }

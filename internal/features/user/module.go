@@ -5,8 +5,7 @@ import (
 
 	"github.com/jun-develop/junkit/i18n"
 
-	"jungo/internal/console"
-	"jungo/internal/features/user/command"
+	"jungo/internal/features/user/adapter"
 	"jungo/internal/features/user/domain"
 	v1handler "jungo/internal/features/user/handler/v1"
 	"jungo/internal/features/user/repository"
@@ -25,10 +24,18 @@ var Module = fx.Module("user",
 	),
 	fx.Provide(
 		fx.Annotate(
-			service.NewUserService,
-			fx.As(new(domain.UserService)),
+			adapter.NewSessionRevokerAdapter,
+			fx.As(new(domain.SessionRevoker)),
 		),
 	),
+	fx.Provide(
+		fx.Annotate(
+			service.NewUserService,
+			fx.As(new(domain.UserService)),
+			fx.As(new(domain.CredentialStore)),
+		),
+	),
+	// Permission codes this feature checks; AccessService receives every feature's codes.
 	fx.Provide(
 		fx.Annotate(
 			func() []string { return domain.Permissions },
@@ -47,20 +54,6 @@ var Module = fx.Module("user",
 	// =============================================================================
 	// COMMANDS
 	// =============================================================================
-	fx.Provide(
-		fx.Annotate(
-			command.NewCreateUserCommand,
-			fx.As(new(console.Command)),
-			fx.ResultTags(`group:"commands"`),
-		),
-	),
-	fx.Provide(
-		fx.Annotate(
-			command.NewListUsersCommand,
-			fx.As(new(console.Command)),
-			fx.ResultTags(`group:"commands"`),
-		),
-	),
 
 	fx.Invoke(registerTranslations),
 )
@@ -75,21 +68,21 @@ func registerTranslations(translator *i18n.Translator) {
 			"permission.users.update": "Update users",
 			"permission.users.delete": "Delete users",
 
-			"user_not_found":       "User not found",
-			"email_already_exists": "This email is already registered",
-			"password_too_long":    "Password is too long (max 72 bytes; accented characters count as more than one)",
-			"invalid_avatar_file":  "Invalid avatar file (allowed: jpg, jpeg, png, webp; max 5MB)",
-			"user_created":         "User created successfully",
-			"user_retrieved":       "User retrieved successfully",
-			"users_listed":         "Users listed successfully",
-			"user_updated":         "User updated successfully",
-			"user_deleted":         "User deleted successfully",
-			"avatar_uploaded":      "Avatar uploaded successfully",
-			"avatar_deleted":       "Avatar deleted successfully",
-
+			"user_not_found":              "User not found",
+			"password_too_long":           "Password is too long (max 72 bytes; accented characters count as more than one)",
 			"cannot_manage_stronger_user": "This user holds permissions you do not hold yourself",
+			"email_already_exists":        "This email is already registered",
+			"invalid_avatar_file":         "Invalid avatar file (allowed: jpg, jpeg, png, webp; max 5MB)",
 			"cannot_change_own_status":    "You cannot change your own status",
 			"cannot_delete_self":          "You cannot delete your own account",
+
+			"user_created":    "User created successfully",
+			"user_retrieved":  "User retrieved successfully",
+			"users_listed":    "Users listed successfully",
+			"user_updated":    "User updated successfully",
+			"user_deleted":    "User deleted successfully",
+			"avatar_uploaded": "Avatar uploaded successfully",
+			"avatar_deleted":  "Avatar deleted successfully",
 		},
 	})
 }

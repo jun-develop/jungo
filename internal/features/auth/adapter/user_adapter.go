@@ -8,26 +8,22 @@ import (
 	userdomain "jungo/internal/features/user/domain"
 )
 
-// UserAdapter implements authdomain.UserProvider over the user feature.
+// UserAdapter implements authdomain.UserProvider over the user feature's CredentialStore; it turns
+// userdomain.ErrUserNotFound into authdomain.ErrUserNotFound.
 type UserAdapter struct {
-	userService userdomain.UserService
+	credentials userdomain.CredentialStore
 }
 
 // NewUserAdapter creates a UserAdapter.
-func NewUserAdapter(userService userdomain.UserService) *UserAdapter {
-	return &UserAdapter{userService: userService}
+func NewUserAdapter(credentials userdomain.CredentialStore) *UserAdapter {
+	return &UserAdapter{credentials: credentials}
 }
 
-// GetCredentialsByEmail implements authdomain.UserProvider; it returns
-// authdomain.ErrUserNotFound for an unknown email.
+// GetCredentialsByEmail implements authdomain.UserProvider.
 func (a *UserAdapter) GetCredentialsByEmail(ctx context.Context, email string) (*authdomain.Credentials, error) {
-	creds, err := a.userService.GetCredentialsByEmail(ctx, email)
+	creds, err := a.credentials.GetCredentialsByEmail(ctx, email)
 	if err != nil {
-		if errors.Is(err, userdomain.ErrUserNotFound) {
-			return nil, authdomain.ErrUserNotFound
-		}
-
-		return nil, err
+		return nil, mapErr(err)
 	}
 
 	return &authdomain.Credentials{
@@ -41,16 +37,16 @@ func (a *UserAdapter) GetCredentialsByEmail(ctx context.Context, email string) (
 	}, nil
 }
 
-// SetPasswordHash implements authdomain.UserProvider; it returns authdomain.ErrUserNotFound for an
-// unknown or deleted user.
+// SetPasswordHash implements authdomain.UserProvider.
 func (a *UserAdapter) SetPasswordHash(ctx context.Context, userID int64, passwordHash string) error {
-	if err := a.userService.SetPasswordHash(ctx, userID, passwordHash); err != nil {
-		if errors.Is(err, userdomain.ErrUserNotFound) {
-			return authdomain.ErrUserNotFound
-		}
+	return mapErr(a.credentials.SetPasswordHash(ctx, userID, passwordHash))
+}
 
-		return err
+// mapErr turns the user feature's not-found error into the auth feature's; others pass through.
+func mapErr(err error) error {
+	if errors.Is(err, userdomain.ErrUserNotFound) {
+		return authdomain.ErrUserNotFound
 	}
 
-	return nil
+	return err
 }

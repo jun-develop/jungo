@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
-	"go.uber.org/zap"
 
 	"jungo/internal/common/actor"
 	"jungo/internal/features/access/domain"
@@ -24,13 +23,34 @@ const (
 // allPermissions is the "permissions" Fx group the tests' AccessService receives.
 var allPermissions = append([]string{usersRead, usersUpdate, usersDelete}, domain.Permissions...)
 
+// The fake users' IDs; actorID is the user asActor acts as.
+const (
+	userA   int64 = 10
+	userB   int64 = 20
+	userC   int64 = 30
+	actorID int64 = 99
+)
+
+// The fake roles' IDs, in newFakeRepository's order.
+const (
+	superAdminRoleID int64 = 1
+	managerRoleID    int64 = 2
+)
+
+// userUUIDs maps the fake users' IDs to their UUIDs.
+var userUUIDs = map[int64]uuid.UUID{userA: uuid.New(), userB: uuid.New(), userC: uuid.New()}
+
 // fakeRepository is an in-memory AccessRepository and UserLookup mirroring the SQL.
 type fakeRepository struct {
-	permissions map[string]string // code -> group
+	// permissions maps each code to its group.
+	permissions map[string]string
 	roles       []*domain.Role
-	grants      map[int64][]string // role ID -> codes
-	userRoles   map[int64][]int64  // user ID -> role IDs
-	actorPerms  map[int64][]string // user ID -> codes, for actors that hold no role here
+
+	// grants maps a role ID to its codes; userRoles a user ID to their role IDs; actorPerms a user
+	// ID to codes for actors that hold no role here.
+	grants     map[int64][]string
+	userRoles  map[int64][]int64
+	actorPerms map[int64][]string
 }
 
 // newFakeRepository returns a repository holding every permission in allPermissions, as after the
@@ -44,8 +64,8 @@ func newFakeRepository() *fakeRepository {
 	return &fakeRepository{
 		permissions: perms,
 		roles: []*domain.Role{
-			{ID: 1, UUID: uuid.New(), Code: "super_admin", IsSystem: true},
-			{ID: 2, UUID: uuid.New(), Code: "manager"},
+			{ID: superAdminRoleID, UUID: uuid.New(), Code: "super_admin", IsSystem: true},
+			{ID: managerRoleID, UUID: uuid.New(), Code: "manager"},
 		},
 		grants:     map[int64][]string{},
 		userRoles:  map[int64][]int64{},
@@ -64,6 +84,13 @@ func (r *fakeRepository) GetUserPermissions(_ context.Context, userID int64) ([]
 	}
 
 	return slices.Compact(slices.Sorted(slices.Values(codes))), nil
+}
+
+func (r *fakeRepository) GetActorAndTargetPermissions(ctx context.Context, actorID, targetID int64) ([]string, []string, error) {
+	held, _ := r.GetUserPermissions(ctx, actorID)
+	target, _ := r.GetUserPermissions(ctx, targetID)
+
+	return held, target, nil
 }
 
 func (r *fakeRepository) ListPermissions(context.Context) ([]domain.Permission, error) {
@@ -96,7 +123,7 @@ func (r *fakeRepository) GetRoleByCode(_ context.Context, code string) (*domain.
 	return nil, domain.ErrRoleNotFound
 }
 
-func (r *fakeRepository) ListRoles(_ context.Context, uuids []uuid.UUID) ([]*domain.Role, error) {
+func (r *fakeRepository) ListRoles(_ context.Context, uuids []uuid.UUID, countUsers bool) ([]*domain.Role, error) {
 	var out []*domain.Role
 	for _, role := range r.roles {
 		if uuids != nil && !slices.Contains(uuids, role.UUID) {
@@ -105,8 +132,11 @@ func (r *fakeRepository) ListRoles(_ context.Context, uuids []uuid.UUID) ([]*dom
 
 		full := *role
 		full.Permissions = slices.Sorted(slices.Values(r.grants[role.ID]))
-		ids, _ := r.ListUserIDsByRole(context.Background(), role.ID)
-		full.UserCount = int64(len(ids))
+		if countUsers {
+			ids, _ := r.ListUserIDsByRole(context.Background(), role.ID, 0)
+			full.UserCount = int64(len(ids))
+		}
+
 		out = append(out, &full)
 	}
 
@@ -168,18 +198,16 @@ func (r *fakeRepository) ReplaceUserRoles(_ context.Context, userID int64, roleI
 	return nil
 }
 
-// userUUIDs maps the fake users' IDs to their UUIDs.
-var userUUIDs = map[int64]uuid.UUID{10: uuid.New(), 20: uuid.New(), 30: uuid.New()}
-
 func (r *fakeRepository) ReplaceRolePermissions(_ context.Context, roleID int64, codes []string) error {
 	r.grants[roleID] = slices.Clone(codes)
 	return nil
 }
 
-func (r *fakeRepository) ListUserIDsByRole(_ context.Context, roleID int64) ([]int64, error) {
+// ListUserIDsByRole returns every user of the role when limit is 0.
+func (r *fakeRepository) ListUserIDsByRole(_ context.Context, roleID int64, limit int32) ([]int64, error) {
 	var ids []int64
 	for userID, roles := range r.userRoles {
-		if slices.Contains(roles, roleID) {
+		if slices.Contains(roles, roleID) && (limit == 0 || len(ids) < int(limit)) {
 			ids = append(ids, userID)
 		}
 	}
@@ -203,13 +231,20 @@ func (c *fakeCache) InvalidateUsers(_ context.Context, ids ...int64) {
 
 func (c *fakeCache) InvalidateAll(context.Context) { c.all++ }
 
+// asActor returns a context whose actor holds perms, as middleware.Guard sets it, and holds them in
+// repo too (the service reloads them from the database before a change).
+func asActor(repo *fakeRepository, perms ...string) context.Context {
+	repo.actorPerms[actorID] = perms
+	return actor.With(context.Background(), &actor.Actor{UserID: actorID, UserUUID: uuid.New(), Permissions: perms})
+}
+
 func newTestService() (*AccessService, *fakeRepository, *fakeCache) {
 	repo, c := newFakeRepository(), &fakeCache{}
 
-	return NewAccessService(repo, repo, c, zap.NewNop(), allPermissions), repo, c
+	return NewAccessService(AccessServiceParams{Repo: repo, Users: repo, Cache: c, Permissions: allPermissions}), repo, c
 }
 
-func TestCheckPermissions(t *testing.T) {
+func TestAccessService_CheckPermissions(t *testing.T) {
 	ctx := context.Background()
 	s, repo, _ := newTestService()
 
@@ -223,7 +258,7 @@ func TestCheckPermissions(t *testing.T) {
 	}
 }
 
-func TestPermissionsComeFromTheDatabase(t *testing.T) {
+func TestAccessService_PermissionsComeFromTheDatabase(t *testing.T) {
 	s, repo, _ := newTestService()
 	manager := repo.roles[1].UUID
 
@@ -240,21 +275,21 @@ func TestPermissionsComeFromTheDatabase(t *testing.T) {
 	}
 }
 
-func TestReplaceRolePermissions(t *testing.T) {
+func TestAccessService_ReplaceRolePermissions(t *testing.T) {
 	s, repo, c := newTestService()
 	ctx := asActor(repo, allPermissions...)
-	repo.userRoles[20] = []int64{2}
+	repo.userRoles[userB] = []int64{managerRoleID}
 	manager, super := repo.roles[1].UUID, repo.roles[0].UUID
 
 	if _, err := s.ReplaceRolePermissions(ctx, manager, []string{usersUpdate, usersRead, usersRead}); err != nil {
 		t.Fatal(err)
 	}
 
-	if want := []string{usersRead, usersUpdate}; !slices.Equal(repo.grants[2], want) {
-		t.Errorf("grants = %v, want %v", repo.grants[2], want)
+	if want := []string{usersRead, usersUpdate}; !slices.Equal(repo.grants[managerRoleID], want) {
+		t.Errorf("grants = %v, want %v", repo.grants[managerRoleID], want)
 	}
 
-	if !slices.Equal(c.users, []int64{20}) {
+	if !slices.Equal(c.users, []int64{userB}) {
 		t.Errorf("invalidated users = %v, want [20]", c.users)
 	}
 
@@ -275,7 +310,7 @@ func TestReplaceRolePermissions(t *testing.T) {
 	}
 }
 
-func TestCreateRole(t *testing.T) {
+func TestAccessService_CreateRole(t *testing.T) {
 	s, repo, _ := newTestService()
 	ctx := asActor(repo, allPermissions...)
 
@@ -308,14 +343,7 @@ func TestCreateRole(t *testing.T) {
 	}
 }
 
-// asActor returns a context whose actor holds perms, as middleware.Guard sets it, and holds them in
-// repo too (the service reloads them from the database before a change).
-func asActor(repo *fakeRepository, perms ...string) context.Context {
-	repo.actorPerms[99] = perms
-	return actor.With(context.Background(), &actor.Actor{UserID: 99, UserUUID: uuid.New(), Permissions: perms})
-}
-
-func TestRoleAPI_SystemRoleIsImmutable(t *testing.T) {
+func TestAccessService_SystemRoleIsImmutable(t *testing.T) {
 	s, repo, _ := newTestService()
 	ctx := asActor(repo, domain.RolesUpdate, domain.RolesDelete, domain.RolesAssign, usersRead)
 	super := repo.roles[0].UUID
@@ -332,14 +360,14 @@ func TestRoleAPI_SystemRoleIsImmutable(t *testing.T) {
 		t.Errorf("delete = %v, want ErrSystemRole", err)
 	}
 
-	if _, err := s.SetUserRoles(ctx, userUUIDs[20], []uuid.UUID{super}); !errors.Is(err, domain.ErrSystemRole) {
+	if _, err := s.SetUserRoles(ctx, userUUIDs[userB], []uuid.UUID{super}); !errors.Is(err, domain.ErrSystemRole) {
 		t.Errorf("assign super_admin = %v, want ErrSystemRole", err)
 	}
 }
 
-func TestRoleAPI_NoEscalation(t *testing.T) {
+func TestAccessService_NoEscalation(t *testing.T) {
 	s, repo, _ := newTestService()
-	repo.grants[2] = []string{usersRead, usersDelete}
+	repo.grants[managerRoleID] = []string{usersRead, usersDelete}
 	manager := repo.roles[1].UUID
 	weak := asActor(repo, domain.RolesCreate, domain.RolesUpdate, domain.RolesDelete, domain.RolesAssign, usersRead)
 
@@ -359,20 +387,20 @@ func TestRoleAPI_NoEscalation(t *testing.T) {
 		t.Errorf("rename stronger role = %v, want ErrEscalation", err)
 	}
 
-	if _, err := s.SetUserRoles(weak, userUUIDs[20], []uuid.UUID{manager}); !errors.Is(err, domain.ErrEscalation) {
+	if _, err := s.SetUserRoles(weak, userUUIDs[userB], []uuid.UUID{manager}); !errors.Is(err, domain.ErrEscalation) {
 		t.Errorf("assign stronger role = %v, want ErrEscalation", err)
 	}
 
 	// The user holds users:delete through manager, so the weak actor may not touch their roles at all,
 	// not even to add one it fully holds.
-	repo.userRoles[30] = []int64{2}
-	if _, err := s.SetUserRoles(weak, userUUIDs[30], nil); !errors.Is(err, domain.ErrCannotManageStrongerUser) {
+	repo.userRoles[userC] = []int64{managerRoleID}
+	if _, err := s.SetUserRoles(weak, userUUIDs[userC], nil); !errors.Is(err, actor.ErrCannotManageStrongerUser) {
 		t.Errorf("remove role from stronger user = %v, want ErrCannotManageStrongerUser", err)
 	}
 
 	held, _ := repo.CreateRole(context.Background(), "held", "Held")
 	repo.grants[held.ID] = []string{usersRead}
-	if _, err := s.SetUserRoles(weak, userUUIDs[30], []uuid.UUID{manager, held.UUID}); !errors.Is(err, domain.ErrCannotManageStrongerUser) {
+	if _, err := s.SetUserRoles(weak, userUUIDs[userC], []uuid.UUID{manager, held.UUID}); !errors.Is(err, actor.ErrCannotManageStrongerUser) {
 		t.Errorf("add held role to stronger user = %v, want ErrCannotManageStrongerUser", err)
 	}
 
@@ -382,30 +410,30 @@ func TestRoleAPI_NoEscalation(t *testing.T) {
 	}
 
 	// Only what changes is checked: users:delete stays, so the actor may change users:read around it.
-	repo.grants[2] = []string{usersDelete}
+	repo.grants[managerRoleID] = []string{usersDelete}
 	if _, err := s.ReplaceRolePermissions(weak, manager, []string{usersRead, usersDelete}); err != nil {
 		t.Errorf("add held permission beside an unheld one = %v, want nil", err)
 	}
 }
 
-func TestSetUserRoles_NotOnSelf(t *testing.T) {
+func TestAccessService_SetUserRoles_NotOnSelf(t *testing.T) {
 	s, repo, _ := newTestService()
-	repo.actorPerms[10] = []string{domain.RolesAssign, usersRead}
-	self := actor.With(context.Background(), &actor.Actor{UserID: 10, UserUUID: userUUIDs[10], Permissions: repo.actorPerms[10]})
+	repo.actorPerms[userA] = []string{domain.RolesAssign, usersRead}
+	self := actor.With(context.Background(), &actor.Actor{UserID: userA, UserUUID: userUUIDs[userA], Permissions: repo.actorPerms[userA]})
 
-	if _, err := s.SetUserRoles(self, userUUIDs[10], []uuid.UUID{repo.roles[1].UUID}); !errors.Is(err, domain.ErrCannotChangeOwnRoles) {
+	if _, err := s.SetUserRoles(self, userUUIDs[userA], []uuid.UUID{repo.roles[1].UUID}); !errors.Is(err, domain.ErrCannotChangeOwnRoles) {
 		t.Errorf("own roles = %v, want ErrCannotChangeOwnRoles", err)
 	}
 }
 
-func TestSetUserRoles(t *testing.T) {
+func TestAccessService_SetUserRoles(t *testing.T) {
 	s, repo, c := newTestService()
-	repo.grants[2] = []string{usersRead}
+	repo.grants[managerRoleID] = []string{usersRead}
 	extra, _ := repo.CreateRole(context.Background(), "extra", "Extra")
-	repo.userRoles[10] = []int64{1} // super_admin
+	repo.userRoles[userA] = []int64{superAdminRoleID}
 	ctx := asActor(repo, domain.RolesAssign, usersRead)
 
-	roles, err := s.SetUserRoles(ctx, userUUIDs[10], []uuid.UUID{repo.roles[1].UUID, extra.UUID, extra.UUID})
+	roles, err := s.SetUserRoles(ctx, userUUIDs[userA], []uuid.UUID{repo.roles[1].UUID, extra.UUID, extra.UUID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -419,15 +447,15 @@ func TestSetUserRoles(t *testing.T) {
 		t.Errorf("roles = %v, want %v (system role kept)", codes, want)
 	}
 
-	if !slices.Equal(c.users, []int64{10}) {
+	if !slices.Equal(c.users, []int64{userA}) {
 		t.Errorf("invalidated users = %v, want [10]", c.users)
 	}
 
-	if roles, _ := s.SetUserRoles(ctx, userUUIDs[10], []uuid.UUID{}); len(roles) != 1 || roles[0].Code != "super_admin" {
+	if roles, _ := s.SetUserRoles(ctx, userUUIDs[userA], []uuid.UUID{}); len(roles) != 1 || roles[0].Code != "super_admin" {
 		t.Errorf("clearing roles kept %v, want only super_admin", roles)
 	}
 
-	if _, err := s.SetUserRoles(ctx, userUUIDs[10], []uuid.UUID{uuid.New()}); !errors.Is(err, domain.ErrRoleNotFound) {
+	if _, err := s.SetUserRoles(ctx, userUUIDs[userA], []uuid.UUID{uuid.New()}); !errors.Is(err, domain.ErrRoleNotFound) {
 		t.Errorf("unknown role = %v, want ErrRoleNotFound", err)
 	}
 
@@ -436,15 +464,15 @@ func TestSetUserRoles(t *testing.T) {
 	}
 }
 
-func TestDeleteRole_InvalidatesItsUsers(t *testing.T) {
+func TestAccessService_DeleteRole_InvalidatesItsUsers(t *testing.T) {
 	s, repo, c := newTestService()
-	repo.userRoles[20] = []int64{2}
+	repo.userRoles[userB] = []int64{managerRoleID}
 
 	if err := s.DeleteRole(asActor(repo, domain.RolesDelete), repo.roles[1].UUID); err != nil {
 		t.Fatal(err)
 	}
 
-	if !slices.Equal(c.users, []int64{20}) {
+	if !slices.Equal(c.users, []int64{userB}) {
 		t.Errorf("invalidated users = %v, want [20]", c.users)
 	}
 
@@ -453,13 +481,13 @@ func TestDeleteRole_InvalidatesItsUsers(t *testing.T) {
 	}
 }
 
-func TestChangesReloadTheActorsPermissions(t *testing.T) {
+func TestAccessService_ChangesReloadTheActorsPermissions(t *testing.T) {
 	s, repo, _ := newTestService()
 	manager := repo.roles[1].UUID
 
 	// The request's cached copy still holds roles:update and roles:delete; the database no longer does.
 	ctx := asActor(repo, domain.RolesUpdate, domain.RolesDelete, usersRead)
-	repo.actorPerms[99] = []string{usersRead}
+	repo.actorPerms[actorID] = []string{usersRead}
 
 	if _, err := s.ReplaceRolePermissions(ctx, manager, []string{usersRead}); !errors.Is(err, actor.ErrForbidden) {
 		t.Errorf("replace permissions = %v, want actor.ErrForbidden", err)

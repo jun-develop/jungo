@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -29,10 +31,11 @@ const (
 // warnBelowRemaining is the remaining-attempts count at which failed logins get a warning.
 const warnBelowRemaining = 2
 
-// Params defines dependencies for AuthService.
-type Params struct {
+// AuthServiceParams defines dependencies for AuthService.
+type AuthServiceParams struct {
 	fx.In
 
+	Lifecycle fx.Lifecycle
 	Config    *config.Config
 	Repo      domain.AuthRepository
 	Cache     domain.SessionCache
@@ -47,40 +50,57 @@ type Params struct {
 
 // AuthService implements domain.AuthService.
 type AuthService struct {
-	cfg       config.AuthConfig
-	repo      domain.AuthRepository
-	cache     domain.SessionCache
-	guard     domain.LoginGuard
-	users     domain.UserProvider
-	sealer    security.TokenSealer
-	hasher    security.PasswordHasher
-	logger    *zap.Logger
-	recaptcha recaptcha.Verifier
-	mailer    mailer.Sender
-	mailLog   bool
-	dev       bool
-	appName   string // MAIL_FROM display name, shown in emails
-	now       func() time.Time
+	cfg        config.AuthConfig
+	repo       domain.AuthRepository
+	cache      domain.SessionCache
+	guard      domain.LoginGuard
+	users      domain.UserProvider
+	sealer     security.TokenSealer
+	hasher     security.PasswordHasher
+	logger     *zap.Logger
+	recaptcha  recaptcha.Verifier
+	mailer     mailer.Sender
+	mailLog    bool
+	senderName string
+	now        func() time.Time
+
+	// resetURL is AUTH_PASSWORD_RESET_URL parsed; resetErr is why password reset is off, or nil.
+	resetURL *url.URL
+	resetErr error
+
+	// background tracks password reset emails still sending, so shutdown waits for them.
+	background sync.WaitGroup
 }
 
-// NewAuthService creates an AuthService.
-func NewAuthService(p Params) *AuthService {
-	return &AuthService{
-		cfg:       p.Config.Auth,
-		repo:      p.Repo,
-		cache:     p.Cache,
-		guard:     p.Guard,
-		users:     p.Users,
-		sealer:    p.Sealer,
-		hasher:    p.Hasher,
-		logger:    p.Logger,
-		recaptcha: p.Recaptcha,
-		mailer:    p.Mailer,
-		mailLog:   p.Config.Mail.Driver == "" || p.Config.Mail.Driver == string(mailer.DriverLog),
-		dev:       p.Config.IsDevelopment(),
-		appName:   senderName(p.Config.Mail.From),
-		now:       time.Now,
+// NewAuthService creates an AuthService. It checks the password reset setup once, logging what to
+// configure when it is off, and makes shutdown wait for emails still sending.
+func NewAuthService(p AuthServiceParams) *AuthService {
+	s := &AuthService{
+		cfg:        p.Config.Auth,
+		repo:       p.Repo,
+		cache:      p.Cache,
+		guard:      p.Guard,
+		users:      p.Users,
+		sealer:     p.Sealer,
+		hasher:     p.Hasher,
+		logger:     p.Logger,
+		recaptcha:  p.Recaptcha,
+		mailer:     p.Mailer,
+		mailLog:    p.Config.Mail.Driver == "" || p.Config.Mail.Driver == string(mailer.DriverLog),
+		senderName: senderName(p.Config.Mail.From),
+		now:        time.Now,
 	}
+
+	s.resetURL, s.resetErr = passwordResetSetup(p.Config, p.Mailer != nil, s.mailLog)
+	if s.resetErr != nil {
+		p.Logger.Warn("auth: password reset is off", zap.Error(s.resetErr))
+	}
+
+	p.Lifecycle.Append(fx.StopHook(func(ctx context.Context) error {
+		return waitOrTimeout(ctx, &s.background)
+	}))
+
+	return s
 }
 
 // Login authenticates email/password and issues a token pair.
@@ -92,11 +112,12 @@ func (s *AuthService) Login(ctx context.Context, input domain.LoginInput) (*doma
 
 	if s.cfg.RecaptchaOnLogin && s.recaptcha != nil {
 		if err := s.recaptcha.Verify(ctx, meta.RecaptchaToken, meta.IPAddress); err != nil {
+			s.logger.Warn("auth: recaptcha rejected login", zap.Error(err))
 			return nil, domain.ErrRecaptchaFailed
 		}
 	}
 
-	remaining, err := s.guard.Attempt(ctx, meta.IPAddress, email)
+	remaining, err := s.guard.Attempt(ctx, meta.IPAddress)
 	if err != nil {
 		return nil, err
 	}
@@ -110,12 +131,15 @@ func (s *AuthService) Login(ctx context.Context, input domain.LoginInput) (*doma
 	stop := tracer.Span(ctx, "Bcrypt Compare")
 	var valid bool
 	if creds == nil {
-		s.hasher.CompareDummy(input.Password)
+		err = s.hasher.CompareDummy(ctx, input.Password)
 	} else {
-		valid = s.hasher.Compare(creds.PasswordHash, input.Password)
+		valid, err = s.hasher.Compare(ctx, creds.PasswordHash, input.Password)
 	}
 
 	stop()
+	if err != nil {
+		return nil, err
+	}
 
 	if !valid {
 		s.guard.RecordFailure(ctx, meta.IPAddress)
@@ -132,10 +156,11 @@ func (s *AuthService) Login(ctx context.Context, input domain.LoginInput) (*doma
 	}
 
 	pair, params, err := s.newTokenPair(meta)
-	params.UserID, params.FamilyUUID = creds.UserID, uuid.New()
 	if err != nil {
 		return nil, err
 	}
+
+	params.UserID, params.FamilyUUID = creds.UserID, uuid.New()
 
 	result, err := s.repo.CreateLoginSession(ctx, params)
 	if err != nil {
@@ -143,8 +168,7 @@ func (s *AuthService) Login(ctx context.Context, input domain.LoginInput) (*doma
 	}
 
 	s.cache.InvalidateFamilies(ctx, result.StaleFamilyUUID)
-
-	s.guard.Succeeded(ctx, meta.IPAddress, email)
+	s.guard.RecordSuccess(ctx, meta.IPAddress)
 
 	return pair, nil
 }
@@ -299,12 +323,12 @@ func (s *AuthService) GetTokenDetails(ctx context.Context, token string) (*domai
 	case session.Refresh.Hash:
 		details.TokenType, details.Status = domain.TokenTypeRefresh, session.Refresh.Status(s.now())
 	default:
-		stored, err := s.repo.GetTokenByHash(ctx, hash)
+		tokenType, err := s.repo.GetTokenTypeByHash(ctx, hash)
 		if err != nil {
 			return nil, err
 		}
 
-		details.TokenType, details.Status = stored.Type, domain.TokenStatusRevoked
+		details.TokenType, details.Status = tokenType, domain.TokenStatusRevoked
 	}
 
 	return details, nil
@@ -377,9 +401,9 @@ func (s *AuthService) newTokenPair(meta domain.Metadata) (*domain.TokenPair, dom
 		AccessExpiresAt:  now.Add(s.cfg.AccessTokenTTL),
 		RefreshHash:      security.HashToken(refreshRaw),
 		RefreshExpiresAt: now.Add(s.cfg.RefreshTokenTTL),
-		IPAddress:        optional(meta.IPAddress, 0),
-		UserAgent:        optional(meta.UserAgent, maxUserAgentLength),
-		DeviceID:         optional(meta.DeviceID, maxDeviceIDLength),
+		IPAddress:        trimmedOrNil(meta.IPAddress, 0),
+		UserAgent:        trimmedOrNil(meta.UserAgent, maxUserAgentLength),
+		DeviceID:         trimmedOrNil(meta.DeviceID, maxDeviceIDLength),
 	}
 
 	accessToken, err := s.sealer.Seal(accessRaw)
@@ -400,8 +424,8 @@ func (s *AuthService) newTokenPair(meta domain.Metadata) (*domain.TokenPair, dom
 	}, params, nil
 }
 
-// optional trims and truncates v (maxLen 0 = unlimited); empty becomes nil.
-func optional(v string, maxLen int) *string {
+// trimmedOrNil trims and truncates v (maxLen 0 = unlimited); empty becomes nil.
+func trimmedOrNil(v string, maxLen int) *string {
 	v = strings.TrimSpace(v)
 	if v == "" {
 		return nil
@@ -412,4 +436,20 @@ func optional(v string, maxLen int) *string {
 	}
 
 	return &v
+}
+
+// waitOrTimeout waits for wg, or until ctx (Fx's stop timeout) ends.
+func waitOrTimeout(ctx context.Context, wg *sync.WaitGroup) error {
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }

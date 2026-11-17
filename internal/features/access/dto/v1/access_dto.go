@@ -58,13 +58,13 @@ func ToCreateRoleInput(req CreateRoleRequest) domain.CreateRoleInput {
 	return domain.CreateRoleInput{Code: req.Code, Name: req.Name, Permissions: req.Permissions}
 }
 
-// UpdateRoleRequest is the request body for PATCH /roles/:uuid; the code never changes.
-type UpdateRoleRequest struct {
+// RenameRoleRequest is the request body for PATCH /roles/:uuid; the code never changes.
+type RenameRoleRequest struct {
 	Name string `json:"name" binding:"required,min=2,max=100"`
 }
 
-// SetRolePermissionsRequest is the request body for PUT /roles/:uuid/permissions; [] clears the role.
-type SetRolePermissionsRequest struct {
+// ReplaceRolePermissionsRequest is the request body for PUT /roles/:uuid/permissions; [] clears the role.
+type ReplaceRolePermissionsRequest struct {
 	Permissions []string `json:"permissions" binding:"required,dive,required"`
 }
 

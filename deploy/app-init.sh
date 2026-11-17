@@ -152,6 +152,14 @@ while true; do
 done
 
 while true; do
+	APP_ENVIRONMENT=$(prompt "Environment (development/production)" "development")
+	case "$APP_ENVIRONMENT" in
+		development | production) break ;;
+		*) echo "${RED}  -> Must be development or production.${RESET}" >&2 ;;
+	esac
+done
+
+while true; do
 	CI_PROVIDER=$(prompt "Release CI (github/gitlab/none)" "github")
 	case "$CI_PROVIDER" in
 		github | gitlab | none) break ;;
@@ -191,6 +199,13 @@ set_env "AUTH_TOKEN_HMAC_SECRET" "$AUTH_TOKEN_HMAC_SECRET"
 set_env "AUTH_TOKEN_ENCRYPTION_KEY" "$AUTH_TOKEN_ENCRYPTION_KEY"
 set_env "AUTH_INTERNAL_SECRET" "$AUTH_INTERNAL_SECRET"
 set_env "TRACER_DEBUG_VALUE" "$TRACER_DEBUG_VALUE"
+set_env "API_ENVIRONMENT" "$APP_ENVIRONMENT"
+if [ "$APP_ENVIRONMENT" = production ]; then
+	set_env "GIN_MODE" "release"
+	set_env "LOG_APP_LEVEL" "info"
+	set_env "DB_QUERY_LOGGING" "false"
+	set_env "RECAPTCHA_MOCK" "false"
+fi
 rm -f .env.bak
 trap - ERR INT TERM
 
@@ -308,6 +323,7 @@ echo "${GREEN}Reset git history (fresh repo, no commits yet)${RESET}"
 echo ""
 echo "${CYAN}== .env created ==${RESET}"
 echo "  APP_NAME=$APP_NAME"
+echo "  API_ENVIRONMENT=$APP_ENVIRONMENT"
 echo "  DB_NAME=$DB_NAME"
 echo "  DB_USER=$DB_USER"
 echo "  API_SERVER_PORT=$API_SERVER_PORT"

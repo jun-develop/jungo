@@ -4,6 +4,9 @@ import "github.com/jun-develop/junkit/response"
 
 // Domain errors for the auth feature.
 var (
+	ErrUserNotFound    = response.New(response.NotFound, "user_not_found")
+	ErrPasswordTooLong = response.New(response.UnprocessableEntity, "password_too_long")
+
 	ErrInvalidCredentials        = response.New(response.Unauthorized, "invalid_credentials")
 	ErrInvalidCredentialsWarning = response.New(response.Unauthorized, "invalid_credentials_warning")
 	ErrUserInactive              = response.New(response.Forbidden, "user_account_is_not_active")
@@ -18,10 +21,7 @@ var (
 	ErrTokenReused      = response.New(response.Unauthorized, "token_reused")
 	ErrTokenNotFound    = response.New(response.NotFound, "token_not_found")
 
-	ErrUserNotFound = response.New(response.NotFound, "user_not_found")
-
 	ErrInvalidResetToken        = response.New(response.BadRequest, "invalid_reset_token")
 	ErrTooManyResetRequests     = response.New(response.TooManyRequests, "too_many_password_reset_requests")
 	ErrPasswordResetUnavailable = response.New(response.Internal, "password_reset_unavailable")
-	ErrPasswordTooLong          = response.New(response.UnprocessableEntity, "password_too_long")
 )

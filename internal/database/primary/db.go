@@ -8,6 +8,7 @@ import (
 	"go.uber.org/fx"
 	"go.uber.org/zap"
 
+	"github.com/jun-develop/junkit/database"
 	"github.com/jun-develop/junkit/database/postgres"
 	"github.com/jun-develop/junkit/tracer"
 
@@ -23,10 +24,28 @@ type DB struct {
 
 // New opens the primary database from cfg.DB.
 func New(lc fx.Lifecycle, log *zap.Logger, cfg *config.Config) (*DB, error) {
-	db, err := postgres.NewDatabase(postgres.Params{Lifecycle: lc, Logger: log, Options: options(cfg)})
+	opts := options(cfg)
+	db, err := postgres.New(opts, log)
 	if err != nil {
 		return nil, err
 	}
+
+	lc.Append(fx.Hook{
+		OnStart: func(ctx context.Context) error {
+			if err := db.Ping(ctx); err != nil {
+				return err
+			}
+
+			log.Info("postgres: connected", zap.String("name", opts.Name), zap.String("dsn", database.MaskDSN(opts.DSN)))
+
+			return nil
+		},
+		OnStop: func(context.Context) error {
+			db.Close()
+
+			return nil
+		},
+	})
 
 	return &DB{DB: db}, nil
 }

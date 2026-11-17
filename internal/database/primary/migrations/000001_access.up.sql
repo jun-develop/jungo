@@ -1,7 +1,22 @@
 -- =============================================================================
+-- Shared by every migration: extensions and the updated_at trigger function.
+-- =============================================================================
+
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+CREATE OR REPLACE FUNCTION f_set_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = now();
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- =============================================================================
 -- PERMISSIONS TABLE
--- Every permission the app knows, filled by seeders/002_access.sql (the app never writes it); the
--- code names them in each feature's domain/permission.go.
+-- Every permission the app knows, filled by the migrations (the app never writes it); the code
+-- names them in each feature's domain/permission.go. Each feature's migration inserts its own
+-- codes and grants them to super_admin.
 -- =============================================================================
 
 CREATE TABLE IF NOT EXISTS permissions (
@@ -30,7 +45,12 @@ CREATE TABLE IF NOT EXISTS roles (
     CONSTRAINT chk_roles_code_format CHECK (code ~ '^[a-z_]+$')
 );
 
-COMMENT ON COLUMN roles.is_system IS 'System roles cannot be changed through the API; super_admin is granted every permission by seeders/002_access.sql';
+COMMENT ON COLUMN roles.is_system IS 'System roles cannot be changed through the API; super_admin is granted every permission by the migrations';
+
+CREATE TRIGGER trg_roles_updated_at
+    BEFORE UPDATE ON roles
+    FOR EACH ROW
+    EXECUTE FUNCTION f_set_updated_at();
 
 -- =============================================================================
 -- ROLE_PERMISSIONS TABLE
@@ -49,23 +69,6 @@ CREATE TABLE IF NOT EXISTS role_permissions (
 CREATE INDEX IF NOT EXISTS idx_role_permissions_permission ON role_permissions (permission_code);
 
 -- =============================================================================
--- USER_ROLES TABLE
--- =============================================================================
-
-CREATE TABLE IF NOT EXISTS user_roles (
-    user_id    BIGINT NOT NULL,
-    role_id    BIGINT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-
-    PRIMARY KEY (user_id, role_id),
-    CONSTRAINT fk_user_roles_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE,
-    CONSTRAINT fk_user_roles_role FOREIGN KEY (role_id) REFERENCES roles (id) ON DELETE CASCADE
-);
-
--- Finds a role's users when its permissions change (permission cache invalidation).
-CREATE INDEX IF NOT EXISTS idx_user_roles_role ON user_roles (role_id);
-
--- =============================================================================
 -- SYSTEM ROLES (every environment, so not in the dev-only seeders)
 -- =============================================================================
 
@@ -73,18 +76,22 @@ INSERT INTO roles (code, name, is_system) VALUES ('super_admin', 'Super Admin', 
 ON CONFLICT (code) DO NOTHING;
 
 -- =============================================================================
--- updated_at trigger
+-- PERMISSIONS
+-- The codes in internal/features/access/domain/permission.go, granted to super_admin. They live
+-- in a migration, not a seeder, so production gets them from db:migrate alone.
 -- =============================================================================
 
-CREATE OR REPLACE FUNCTION f_set_roles_updated_at()
-RETURNS TRIGGER AS $$
-BEGIN
-    NEW.updated_at = now();
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
+INSERT INTO permissions (code, group_code) VALUES
+    ('roles:read',   'access'),
+    ('roles:create', 'access'),
+    ('roles:update', 'access'),
+    ('roles:delete', 'access'),
+    ('roles:assign', 'access')
+ON CONFLICT (code) DO NOTHING;
 
-CREATE TRIGGER trg_roles_updated_at
-    BEFORE UPDATE ON roles
-    FOR EACH ROW
-    EXECUTE FUNCTION f_set_roles_updated_at();
+INSERT INTO role_permissions (role_id, permission_code)
+SELECT r.id, p.code
+FROM roles r
+JOIN permissions p ON p.code IN ('roles:read', 'roles:create', 'roles:update', 'roles:delete', 'roles:assign')
+WHERE r.code = 'super_admin'
+ON CONFLICT DO NOTHING;

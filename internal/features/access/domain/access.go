@@ -31,19 +31,21 @@ type CreateRoleInput struct {
 type AccessRepository interface {
 	WithTransaction(ctx context.Context, fn func(ctx context.Context) error) error
 	GetUserPermissions(ctx context.Context, userID int64) ([]string, error)
+	GetActorAndTargetPermissions(ctx context.Context, actorID, targetID int64) (actor, target []string, err error)
 	ListPermissions(ctx context.Context) ([]Permission, error)
 	CreateRole(ctx context.Context, code, name string) (*Role, error)
-	ListRoles(ctx context.Context, uuids []uuid.UUID) ([]*Role, error)
+	ListRoles(ctx context.Context, uuids []uuid.UUID, countUsers bool) ([]*Role, error)
 	LockRoles(ctx context.Context, uuids []uuid.UUID) error
 	UpdateRoleName(ctx context.Context, roleID int64, name string) error
 	DeleteRole(ctx context.Context, roleID int64) error
 	ReplaceRolePermissions(ctx context.Context, roleID int64, codes []string) error
-	ListUserIDsByRole(ctx context.Context, roleID int64) ([]int64, error)
+	ListUserIDsByRole(ctx context.Context, roleID int64, limit int32) ([]int64, error)
 	ListUserRoles(ctx context.Context, userID int64) ([]*Role, error)
 	ReplaceUserRoles(ctx context.Context, userID int64, roleIDs []int64) error
 }
 
-// UserLookup finds users by UUID; implemented over the user feature.
+// UserLookup finds users by UUID; implemented over the user feature. Both return
+// domain.ErrUserNotFound for an unknown user.
 type UserLookup interface {
 	GetUserID(ctx context.Context, uid uuid.UUID) (int64, error)
 	LockUser(ctx context.Context, uid uuid.UUID) (int64, error)

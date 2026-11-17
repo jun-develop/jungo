@@ -52,7 +52,7 @@ a reference for the `junkit` packages.
 | **Docker Desktop** (Docker + Docker Compose) | Running the app, Postgres, and every other service — the primary, supported way to run this project | `brew install --cask docker`, or download from [docker.com](https://www.docker.com/products/docker-desktop/) | Download from [docker.com](https://www.docker.com/products/docker-desktop/) (the installer sets up the required WSL2 backend), or `winget install Docker.DockerDesktop` |
 | **[`golang-migrate`](https://github.com/golang-migrate/migrate) CLI** | `make migrate-*` — applying database migrations. It always runs from your host, pointed at the Postgres port the dev stack exposes (the prod stack exposes none) | `brew install golang-migrate` | `scoop install migrate` (needs [Scoop](https://scoop.sh) — see below) |
 | **`psql`** (PostgreSQL client) | `make migrate-up` / `make migrate-functions` / `make db-seed` — applying the SQL functions and demo seeders. Like `migrate`, it runs from your host against the exposed Postgres port | `brew install libpq && brew link --force libpq` (client only, no server) | `scoop install postgresql` (includes `psql`) |
-| **[`sqlc`](https://sqlc.dev)** *(optional)* | `make sqlc` — regenerating `internal/database/primary/sqlc` after you change a query. Not needed just to run the app | `brew install sqlc` | Download the Windows binary from the [sqlc releases page](https://github.com/sqlc-dev/sqlc/releases) |
+| **[`sqlc`](https://sqlc.dev)** | `make sqlc` — regenerating `internal/database/primary/sqlc` after you change a query, and after every `make feature` (a generated feature does not build before). Not needed just to run the app | `brew install sqlc` | Download the Windows binary from the [sqlc releases page](https://github.com/sqlc-dev/sqlc/releases) |
 | **Go 1.26.5** *(optional)* | Only if you run things outside Docker (`go build`, `go test`, `go run ./cmd/console`, ...) | `brew install go` | [go.dev/dl](https://go.dev/dl/) |
 
 Windows without [Scoop](https://scoop.sh) yet: install it first, in a regular (non-admin)
@@ -94,7 +94,7 @@ changed it in `make app-init`).
 > make app-logs
 > ```
 >
-> Wait for a line containing **`server starting`** — from then on the API responds normally.
+> Wait for a line containing **`server: starting`** — from then on the API responds normally.
 >
 > This only happens once. The downloaded modules and build cache are kept in Docker volumes, so
 > later starts take a few seconds and hot reload rebuilds only what you changed. It becomes slow
@@ -127,6 +127,10 @@ curl http://localhost:<API_SERVER_PORT>/api/v1/users \
 Every `/api/v1/users` route requires a logged-in user — see [6 Authentication](#6-authentication)
 for the full login / refresh / logout flow — and most need a permission, see [Permissions](#permissions).
 
+**Every endpoint, its parameters, body and response:** open `http://localhost:<API_SERVER_PORT>/docs`
+(Scalar, development only; the raw OpenAPI 3 document is at `/docs/openapi.json`). Paste the
+access token under **Authentication** to call protected routes from the page with **Test Request**.
+
 ### Demo accounts
 
 Seeded by `make migrate-up` **only when `API_ENVIRONMENT=development`**. All use the password
@@ -146,13 +150,8 @@ Their roles (seeded by `002_access.sql`):
 | `member@jungo.com` | `member` | `users:read` |
 | `user@jungo.com` | — | none: can only read and edit themself |
 
-Re-seed any time with `make db-seed` (existing rows are skipped).
-
-Outside development, create the first user with:
-
-```bash
-make console CMD="user:create" ARGS="-email=... -first-name=... -last-name=..."
-```
+Re-seed any time with `make db-seed` (existing rows are skipped; it refuses to run unless
+`API_ENVIRONMENT=development`). Outside development, see [First admin](#first-admin).
 
 ---
 
@@ -168,20 +167,22 @@ Run `make help` for the full list.
 | `make app-dev-bg` | Build and start the dev stack (App + PostgreSQL), detached |
 | `make app-dev` | Same, but attached (streams logs, Ctrl+C to stop) |
 | `make app-dev WITH=cache` | Also start Redis and enable the `cache` package |
+| `make app-dev WITH=mail` | Also start Mailpit, a local SMTP server (UI on `http://localhost:8025`) |
 | `make app-dev WITH=full` | Start every optional service (Redis, Mailpit) |
 | `make app-logs` | Follow the app container's logs |
 | `make app-dev-down` | Stop and remove the dev stack |
-| `make app-prod` / `make app-prod-bg` / `make app-prod-down` | Same as above, for the prod stack |
+| `make app-prod` / `make app-prod-bg` / `make app-prod-down` | Same as above, for the prod stack; it applies the migrations first (`migrate` service, see [Deploying to production](#deploying-to-production)) |
 
 **Database**
 
 | Command | What it does |
 |---|---|
-| `make migrate-up` | Apply pending migrations + SQL functions (+ demo data in development) |
+| `make migrate-up` | Apply pending migrations + SQL functions (+ demo data in development), with the `migrate` CLI |
+| `make migrate-functions` | Re-apply every `internal/database/primary/functions/*.sql` |
 | `make migrate-down` | Roll back the last migration |
 | `make migrate-refresh` | Drop everything and re-run all migrations (**destroys data**) |
 | `make migrate-create NAME=add_x` | Scaffold a new migration |
-| `make db-seed` | Apply `internal/database/primary/seeders/*.sql` (demo data, never in production) |
+| `make db-seed` | Apply `internal/database/primary/seeders/*.sql` (demo data; development only) |
 | `make export-db` | Dump the running stack's database (dev or prod) to `./<DB_NAME>_<timestamp>.sql` (gitignored) |
 | `make sqlc` | Regenerate `internal/database/primary/sqlc` from `internal/database/primary/queries` |
 
@@ -192,15 +193,38 @@ Run `make help` for the full list.
 | `make feature NAME=product` | Generate a new feature — see [13](#13-adding-a-new-feature) |
 | `make feature-remove NAME=product` | Remove a generated feature |
 | `make command NAME=... SIGNATURE=...` | Generate a new CLI command — see [14](#14-adding-a-new-console-command) |
-| `make console CMD="user:list"` | Run a CLI command inside the running stack — see [8](#8-console-commands) |
+| `make console CMD="health:check"` | Run a CLI command inside the running stack — see [8](#8-console-commands) |
+| `make build` | Compile the API binary to `bin/api` |
 | `make test` / `make vet` / `make fmt` / `make tidy` | Standard Go checks |
+| `make vuln` | Scan dependencies and the Go toolchain for known vulnerabilities your code calls |
 | `make junkit-update [VERSION=v0.0.8]` | Upgrade junkit to its latest release (or a given tag), then `go mod tidy` |
 
 ### Updating `junkit`
 
 `junkit` is fetched as a pinned dependency at build time, not mounted live — hot reload only
-watches this repo. To pick up a `junkit` change: publish a new tag in that repo, bump the version
-here (`go get github.com/jun-develop/junkit@vX.Y.Z`), and rebuild.
+watches this repo. To pick up a `junkit` change: publish a new tag in that repo, run
+`make junkit-update VERSION=vX.Y.Z`, and rebuild.
+
+### Deploying to production
+
+`make app-prod-bg` builds one image holding both binaries (`api`, `console`) and starts:
+
+1. `postgresql` (no port published to the host);
+2. `migrate`, a one-shot container running `./console db:migrate`: it applies the migrations and
+   SQL functions built into the binary, keeping golang-migrate's `schema_migrations` table (so
+   `make migrate-up` and it can be used on the same database), then exits;
+3. `app`, once `migrate` succeeded, with `API_ENVIRONMENT=production` and `GIN_MODE=release`
+   forced whatever `.env` says.
+
+No seeders run in production. Create the first admin with SQL (see [First admin](#first-admin)).
+`make app-init` also writes a release CI workflow (GitHub Actions or GitLab CI, your choice) that
+builds the binaries when you push a `v*` tag.
+
+### Renaming the Go module
+
+The module is `jungo` (`go.mod`, every import, and `moduleName` in `cmd/scaffold/main.go`). To
+rename it, replace `jungo/` in every import and `module jungo` in `go.mod`, set `moduleName` to the
+new path, then run `go build ./...`.
 
 ---
 
@@ -208,23 +232,30 @@ here (`go get github.com/jun-develop/junkit@vX.Y.Z`), and rebuild.
 
 All configuration is environment variables in `.env` (created by `make app-init`), parsed into
 `internal/config/config.go`'s `Config` struct via [`caarlos0/env`](https://github.com/caarlos0/env).
-`.env.example` documents every variable inline. Highlights:
+`.env.example` lists every variable (optional ones commented out with their default). Highlights:
 
 | Variable | Purpose |
 |---|---|
-| `API_ENVIRONMENT` | Defaults to `production` when unset; `development` (set in `.env.example`) enables demo seeding and dev-friendly defaults |
+| `API_ENVIRONMENT` | Defaults to `production` when unset; `development` (set by `make app-init` when you choose it) enables demo seeding, random token keys, `MAIL_DRIVER=log` for password reset and the reCAPTCHA mock. The prod stack forces `production` whatever `.env` says |
 | `API_SERVER_PORT` | Port the API listens on (default `8080`) |
-| `DB_*` | Postgres connection + pool tuning |
+| `DB_*` | Postgres connection + pool tuning; `DB_STATEMENT_TIMEOUT` (30s) / `DB_IDLE_IN_TX_TIMEOUT` (60s) make Postgres end a stuck query or transaction so it cannot hold a pooled connection forever |
 | `SECURITY_MAX_BODY_SIZE` | Default largest request body in bytes (2 MB); a route that needs more (e.g. the 5 MB avatar upload) declares its own limit — see [Larger request bodies](#larger-request-bodies-uploads) |
 | `SECURITY_TRUSTED_PROXIES` | **Set this behind a reverse proxy / load balancer** (comma-separated IPs or CIDRs). Empty = `X-Forwarded-For` is ignored, so every client appears as the proxy's IP and they all share one rate limit and one failed-login blacklist (8 failures would lock everyone out for 24h). An invalid entry fails startup |
+| `SECURITY_FORCE_HSTS` | `true` sends `Strict-Transport-Security` even over plain HTTP; set it when a TLS-terminating proxy sits in front (default `false`) |
 | `AUTH_*` | Login, tokens and brute-force limits — see [Authentication › Configuration](#authentication-configuration) |
 | `TRACER_DEBUG_KEY` / `TRACER_DEBUG_VALUE` | Query-param name/value that, with the `X-Internal-Secret: <AUTH_INTERNAL_SECRET>` header, unlocks the [debug dashboard](#7-live-debug-dashboard) |
-| `CACHE_REDIS_ENABLE` | `false` (default): no cache, sessions and permissions are read from the database on every request; `true`: Redis (start it with `WITH=cache`), shared by every instance |
+| `CACHE_REDIS_ENABLED` | `false` (default): no cache, sessions and permissions are read from the database on every request; `true`: Redis (start it with `WITH=cache`), shared by every instance |
+| `CORS_*` | Which websites may call the API from a browser. List the origins in production; never combine `*` with `CORS_ALLOW_CREDENTIALS=true` |
+| `LOG_*` | Level per log channel (`app`, `http`, `sql`, `limiter`) and file rotation |
+| `LIMITER_*` / `BANNER_*` | Per-client rate limit, and banning of clients that probe the API (see [11](#11-how-a-request-flows-through-the-app)) |
 | `STORAGE_DIR` | The one folder the app writes to (default `./storage`): `logs/`, `uploads/`, `bootstrap/`. New files on disk go through `cfg.StoragePath(...)`, never a hard-coded path |
 | `STORAGE_BASE_URL` | Public URL of uploads (empty = `http://localhost:<port>/uploads`) |
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | Ops alerts for panics/rate-limit breaches; empty = safe no-op |
-| `MAIL_*` | Outgoing email via junkit `mailer`. `MAIL_DRIVER=log` (default) only logs emails; `smtp` works with any provider (Brevo, Resend, SES, ...), `brevo` uses the Brevo API. Changing provider is config only |
+| `MAIL_*` | Outgoing email via junkit `mailer`. `MAIL_DRIVER=log` (default) only logs emails; `smtp` works with any provider (Brevo, Resend, SES, ...), `brevo` uses the Brevo API. Changing provider is config only. SMTP requires TLS; `MAIL_SMTP_ALLOW_PLAINTEXT=true` only for a local server without it (Mailpit, `WITH=mail`) |
 | `RECAPTCHA_MOCK` | Verifier always succeeds when true; honored in development only |
+
+Outside development the app logs a warning at startup for development defaults still set
+(`DB_SSLMODE=disable`, the `postgres` password, `CORS_ALLOW_ORIGINS=*`).
 
 ### Container resource limits
 
@@ -292,7 +323,8 @@ login ──► access + refresh token
 ### Login
 
 Send `X-Device-ID` (a stable id per app install/browser) if you can: logging in again from the
-same device reuses its session instead of creating a new one. Without it, IP + User-Agent is used.
+same device continues its session (new tokens, the old ones retired) instead of creating a new one.
+Without it, IP + User-Agent is used.
 
 ```bash
 curl -X POST http://localhost:<API_SERVER_PORT>/api/v1/auth/login \
@@ -330,7 +362,10 @@ curl http://localhost:<API_SERVER_PORT>/api/v1/auth/me \
 ### Refresh
 
 The refresh token goes in the **body**, never in `Authorization`. Each refresh token works
-**once**; always store the new pair. Reusing an old one ends the session (possible theft).
+**once**; always store the new pair. Reusing an old one ends the session (possible theft), and so
+does reusing one retired by a later login on the same device. Within 10 seconds of the exchange a
+reuse only fails (`Token has been revoked`) without ending the session, so two tabs refreshing at
+the same moment do not log the user out.
 
 ```bash
 curl -X POST http://localhost:<API_SERVER_PORT>/api/v1/auth/refresh \
@@ -365,13 +400,16 @@ Errors look like this:
 | 401 | Token has been revoked · Refresh token was already used… · Invalid token | Send the user to the login screen |
 | 401 | Invalid token type | A refresh token was sent as `Bearer`; use the access token |
 | 401 | Invalid email or password (…) | Wrong credentials; the longer variant means the IP is close to being blocked |
+| 422 | Password is too long… | Over 72 bytes (bcrypt's limit); accented characters count as several bytes |
 | 403 | Your account is not active | Account disabled |
 | 429 | Too many failed login attempts… · Your IP has been temporarily blocked… | Too many failed logins; wait |
 
 ### Internal endpoints (service-to-service)
 
 For other backend services, never browsers. They need the `X-Internal-Secret` header
-(`AUTH_INTERNAL_SECRET`); when it is unset they answer `403` to everyone.
+(`AUTH_INTERNAL_SECRET`); when it is unset they answer `403` to everyone. They are served by the
+`v1` handler (they share its token DTOs) but are not versioned: `router/private` mounts them under
+`/api/internal`, each wrapped by `guard.Internal`.
 
 **Token details** — inspect any token, including expired or revoked ones (e.g. another service
 checking who a token belongs to, or support investigating a session):
@@ -437,7 +475,7 @@ curl -X POST http://localhost:<API_SERVER_PORT>/api/internal/auth/revoke \
 ```json
 {
   "status": "success",
-  "message": "Token revoked successfully"
+  "message": "Session revoked successfully"
 }
 ```
 
@@ -462,9 +500,10 @@ curl -X POST http://localhost:<API_SERVER_PORT>/api/internal/auth/revoke-all \
 ### Password reset
 
 Needs email (`MAIL_*`, see [Configuration](#5-configuration)) and `AUTH_PASSWORD_RESET_URL`, the
-frontend page the emailed link opens. Without them `forgot-password` answers 500
-`password_reset_unavailable` and the app log says what to set. In development `MAIL_DRIVER=log`
-is enough: the email, link included, is written to the log instead of sent.
+frontend page the emailed link opens. Without them `forgot-password` answers 500 ("Password reset
+is currently unavailable"); the app checks this once at startup and logs what to set. In
+development `MAIL_DRIVER=log` is enough: the email, link included, is written to the log instead of
+sent (`make app-dev WITH=mail` gives a real local SMTP server instead).
 
 ```bash
 # 1. Request a link. Same answer whether or not the email is registered.
@@ -479,11 +518,15 @@ curl -X POST http://localhost:<API_SERVER_PORT>/api/v1/auth/reset-password \
 ```
 
 - The link works once and expires after `AUTH_PASSWORD_RESET_TTL`; a newer request replaces it.
-- A reset logs the user out of every device.
+- A reset logs the user out of every device. Using the token, saving the password and the logout
+  happen in one transaction: if any step fails, nothing changed and the link still works.
 - Abuse: each IP may ask `AUTH_PASSWORD_RESET_IP_MAX` times and each email
   `AUTH_PASSWORD_RESET_EMAIL_MAX` times per `AUTH_PASSWORD_RESET_WINDOW`, then gets 429. Only
-  registered, active emails are mailed, and the email is sent in the background so response time
-  does not reveal registered emails.
+  registered, active emails are mailed. Every request is answered after the same single lookup:
+  the token is stored and the email rendered and sent in the background, so response time does not
+  reveal registered emails.
+- The link carries the token in its query string: the frontend page should send
+  `Referrer-Policy: no-referrer` and remove `?token=` from the address bar once it has read it.
 
 <a id="authentication-configuration"></a>
 ### Configuration
@@ -497,26 +540,29 @@ curl -X POST http://localhost:<API_SERVER_PORT>/api/v1/auth/reset-password \
 | `AUTH_INTERNAL_SECRET` | — | `X-Internal-Secret` for `/api/internal/auth/*`; empty disables them |
 | `AUTH_ACCESS_TOKEN_TTL` | `15m` | Access token lifetime |
 | `AUTH_REFRESH_TOKEN_TTL` | `720h` | Refresh token lifetime (how long a user stays logged in without activity) |
-| `AUTH_SESSION_CACHE_TTL` | `3m` | How long a session is cached (Redis, or memory without it); `0` disables the cache |
-| `AUTH_REVOKED_RETENTION` | `168h` | How long expired/revoked tokens are kept before cleanup (needed to detect reused refresh tokens) |
+| `AUTH_SESSION_CACHE_TTL` | `3m` | How long a session is cached in Redis (no cache without Redis); `0` disables it |
+| `AUTH_PERMISSION_CACHE_TTL` | `60s` | How long a user's permissions are cached in Redis |
+| `AUTH_REVOKED_RETENTION` | `168h` | How long expired/revoked tokens are kept before cleanup. Exchanged refresh tokens stay longer, until they would have expired, so their reuse is always detected |
 | `AUTH_PASSWORD_COST` | `10` | bcrypt cost; +1 doubles the hashing time (10 ≈ 45 ms, 12 ≈ 180 ms). 10 on purpose: OWASP's minimum, sized for a 2 vCPU server; do not raise it without the owner's decision (stored hashes keep their cost, so it needs rehash-on-login) |
 | `AUTH_RECAPTCHA_ON_LOGIN` | `false` | Require a reCAPTCHA token on login (`recaptcha_token` in the body) |
-| `AUTH_LOGIN_MAX_ATTEMPTS` / `AUTH_LOGIN_BLOCK_WINDOW` | `5` / `15m` | Failed logins per IP before a short block |
+| `AUTH_LOGIN_MAX_ATTEMPTS` / `AUTH_LOGIN_BLOCK_WINDOW` | `5` / `15m` | Login attempts per IP before a short block (a success clears it). Logins are not limited per email: anyone could then lock any account out by failing on purpose. Enable `AUTH_RECAPTCHA_ON_LOGIN` against attacks spread over many IPs |
 | `AUTH_LOGIN_BLACKLIST_ATTEMPTS` / `AUTH_LOGIN_BLACKLIST_WINDOW` | `8` / `24h` | Failed logins per IP before a long block (+ Telegram alert if configured) |
-| `AUTH_LOGIN_EMAIL_MAX_ATTEMPTS` | `10` | Failed logins per email (any IP) within `AUTH_LOGIN_BLOCK_WINDOW` |
 | `AUTH_PASSWORD_RESET_URL` | — | Frontend page the reset email links to (`?token=` is appended); empty disables password reset |
 | `AUTH_PASSWORD_RESET_TTL` | `30m` | How long a reset link works |
 | `AUTH_PASSWORD_RESET_IP_MAX` / `AUTH_PASSWORD_RESET_EMAIL_MAX` / `AUTH_PASSWORD_RESET_WINDOW` | `5` / `3` / `1h` | Reset requests allowed per IP and per email within the window |
 
 ### Operations
 
-- **First user**: seeded in development (see [Demo accounts](#demo-accounts)); elsewhere
-  `make console CMD="user:create" ARGS="-email=... -first-name=... -last-name=..."`, then make them
-  `super_admin` with SQL (see [Permissions](#permissions)).
-- **Cleanup**: run `make console CMD="auth:cleanup-tokens"` daily (cron) to delete old tokens (password reset tokens included).
+- **First user**: seeded in development (see [Demo accounts](#demo-accounts)); elsewhere see
+  [First admin](#first-admin).
+- **Cleanup**: run `make console CMD="auth:cleanup-tokens"` daily (cron) to delete old tokens
+  (password reset tokens included). It deletes in batches of 5000, so it never locks
+  `auth_tokens` for long.
 - **Leaked key**: replace both `AUTH_TOKEN_*` keys and restart — every user must log in again.
-- **Several app instances**: without Redis nothing is cached, so a logout, a disabled user or a removed permission applies on every instance at once; only login limits are counted per instance (in memory). Enable Redis (`CACHE_REDIS_ENABLE=true`) to save the database reads and share login limits.
-- **Disabling or deleting a user** logs them out of every device immediately.
+- **Several app instances**: without Redis nothing is cached, so a logout, a disabled user or a removed permission applies on every instance at once; only login limits are counted per instance (in memory). Enable Redis (`CACHE_REDIS_ENABLED=true`) to save the database reads and share login limits.
+- **Disabling or deleting a user** logs them out of every device immediately, in the same
+  transaction as the change. A profile change (name, avatar) drops their cached sessions, so
+  `/auth/me` shows it at once.
 
 ### Permissions
 
@@ -524,19 +570,20 @@ Routes are protected by **permissions** (`users:create`), never by role names. A
 set of permissions stored in the database; a user can hold several roles and gets the union.
 
 - **Permissions live in the database**: the `permissions` table is the source of truth (code + UI
-  group). `internal/database/primary/seeders/002_access.sql` inserts the built-in ones (`users:*`,
-  `roles:*`) and grants them all to `super_admin`. Each feature declares the codes it checks in its
+  group). Each feature's migration inserts its own codes and grants them to `super_admin`
+  (`000001_access` the `roles:*`, `000002_users` the `users:*`, a generated feature its table's). The
+  seeders only add demo roles and accounts. Each feature declares the codes it checks in its
   own `domain/permission.go` (`Permissions`) and provides them to the `permissions` Fx group from its
   `module.go`, next to their i18n names — so they come and go with the feature. **The app never
   writes permissions.** On start it only reads the table and refuses to start if a declared
-  permission is missing.
-  `make migrate-up` runs the seeders only when `API_ENVIRONMENT=development`. On other servers run
-  only `seeders/002_access.sql` with psql — never `make db-seed`, which loads every demo seeder —
-  then delete the demo roles it adds:
-  `DELETE FROM roles WHERE code IN ('manager', 'member') AND NOT is_system;`
-- **Routes**: every route under `/api/v1` must be wrapped by `guard.Can(handler, perm...)`,
-  `guard.Authenticated(handler)` or `guard.Public(handler)` — otherwise the app refuses to start.
+  permission is missing (the API only; the console skips the check, so `db:migrate` can run first).
+- **Routes**: every route under `/api` must be wrapped by `guard.Can(handler, perm...)`,
+  `guard.Authenticated(handler)`, `guard.Public(handler)` or, for service-to-service routes whose
+  group checks the caller itself, `guard.Internal(handler)` — otherwise the app refuses to start.
   `Can` panics at startup on a permission no feature declares (a typo).
+- **Where checks go**: `guard.Can` is the only check for a plain permission. A service checks only
+  what depends on the target: ownership (`actor.RequireSelfOrPermission`) and "may this actor
+  manage that user" (`actor.RequireManage`, which reads both users' permissions from the database).
 - **Acting on users**: `Authenticated` routes acting on one user (`GET/PATCH /users/:uuid`, avatar)
   let the user act on themself, except changing their own status (403 `cannot_change_own_status`).
   Acting on someone else needs `users:read` / `users:update` / `users:delete`; without it the answer
@@ -562,11 +609,19 @@ set of permissions stored in the database; a user can hold several roles and get
 - **System roles** (`super_admin`) cannot be renamed, edited, deleted, given or taken through the
   API; `PUT /users/:uuid/roles` keeps them. Give them with SQL.
 
-Roles are managed through the API (see [Endpoints](#endpoints)); there are no console commands. The
-first `super_admin` on a new server (development seeds `admin@jungo.com`) is given with SQL — review
-it and run it yourself:
+Roles and users are managed through the API (see [Endpoints](#endpoints)); console commands are
+for background work only, never CRUD.
+
+<a id="first-admin"></a>
+**First admin on a new server** (development seeds `admin@jungo.com` instead): create them with SQL
+once, then use the API. Review it and run it yourself, e.g. with
+`docker compose -f deploy/docker-compose.yaml --env-file .env exec postgresql psql -U <DB_USER> <DB_NAME>`
+(`pgcrypto` is enabled by the first migration; `bf, 10` matches `AUTH_PASSWORD_COST`):
 
 ```sql
+INSERT INTO users (email, password_hash, first_name, last_name)
+VALUES ('ops@example.com', crypt('<a strong password>', gen_salt('bf', 10)), 'Ops', 'Admin');
+
 INSERT INTO user_roles (user_id, role_id)
 SELECT u.id, r.id FROM users u JOIN roles r ON r.code = 'super_admin'
 WHERE u.email = 'ops@example.com' AND u.deleted_at IS NULL
@@ -630,25 +685,27 @@ own annotations and spans to the timeline.
 
 ## 8. Console commands
 
-Besides the HTTP API, `cmd/console` is a second entrypoint for one-off CLI commands (health
-checks, data backfills, ad-hoc reports) that need the same dependencies (database, cache,
-services, ...) as the API server, without going through HTTP.
+Besides the HTTP API, `cmd/console` is a second entrypoint for background and maintenance work
+(migrations, cleanups, data backfills, scheduled jobs) that needs the same dependencies (database,
+cache, services, ...) as the API server, without going through HTTP. CRUD belongs to the API, never
+to a command.
 
 ```bash
 make console CMD="health:check"
-make console CMD="user:list"
-make console CMD="user:create" ARGS="-email=... -first-name=... -last-name=..."
-make console CMD="auth:cleanup-tokens"
-go run ./cmd/console health:check   # equivalent, run directly on the host
+make console CMD="db:migrate"
+make console CMD="auth:cleanup-tokens" ARGS="-retention=72h"
 ```
+
+`go run ./cmd/console <command>` also works on the host, but nothing loads `.env` there: export the
+variables first (with `DB_HOST=localhost`), e.g. `set -a; . ./.env; set +a; DB_HOST=localhost go run ./cmd/console health:check`.
 
 Logs are written to the `storage/logs/*.log` files only, whatever `API_ENVIRONMENT` is; startup
 errors still print. Add `--verbose` to also print app logs and the SQL that ran, or `--debug` to
 print everything (Fx wiring included):
 
 ```bash
-make console CMD="user:list --verbose"
-make console CMD="user:list --debug"
+make console CMD="health:check --verbose"
+make console CMD="health:check --debug"
 ```
 
 Running with no command lists every registered signature. To write your own, see
@@ -689,12 +746,12 @@ jungo/
 │   └── scaffold/        code generator behind `make feature` / `make command`
 ├── internal/
 │   ├── app/             Fx composition root (fx.go, app.go)
-│   ├── common/          shared helpers for the whole project (actor: the request's user + permissions)
+│   ├── common/          shared by every feature: actor (the request's user + permissions)
 │   ├── config/          env-var → Config struct
 │   ├── console/         console command kernel (Command interface, dispatcher, global commands)
-│   ├── middleware/      app access policy: BearerAuth, RequireSecret, permission Guard
+│   ├── middleware/      app access policy: BearerAuth / Authenticate, RequireSecret, permission Guard
 │   ├── router/          global middleware + route collection
-│   ├── database/        one folder per database — primary/: connection, migrations, functions, seeders, sqlc queries + generated code
+│   ├── database/        one folder per database — primary/: connection, embedded migrator, migrations, functions, seeders, sqlc queries + generated code
 │   └── features/        user (sample feature — see 12), auth (see 6), access (roles & permissions — see Permissions in 6)
 └── deploy/              Dockerfile, docker-compose (dev + prod)
 ```
@@ -708,7 +765,7 @@ dependency, no local checkout needed) holds every infrastructure package listed 
 | Where | What | Rule |
 |---|---|---|
 | `junkit/middleware` | `Security`, `Trace`, `CORS`, `Payload`, `Banner`, `Limiter`, `Recover`, `AccessLog`, `RoutePatterns`, `TracerDebug` | Required protection and plumbing every app needs. Configured once in `internal/router/router.go`; you tune options, not code. |
-| `internal/middleware` | `BearerAuth`, `RequireSecret`, permission `Guard` | App policy — who may call what. Yours to read, change and extend. |
+| `internal/middleware` | `BearerAuth` / `Authenticate`, `RequireSecret`, permission `Guard` | App policy — who may call what. Yours to read, change and extend. |
 
 Rule of thumb: a middleware that decides **who may do what** belongs in `internal/middleware`; one
 that protects or instruments **every** request, whatever the app, belongs in junkit.
@@ -719,8 +776,8 @@ that protects or instruments **every** request, whatever the app, belongs in jun
 
 ```
 cmd/api/main.go
-  → app.NewFx()                         builds the Fx graph, cfg := config.NewConfig()
-      → internal/app/fx.go              GetFxOptions(): every junkit Module + feature Module
+  → app.NewAPIFx()                      builds the Fx graph, cfg := config.NewConfig()
+      → internal/app/fx.go              FxOptions(): every junkit Module + feature Module
           → router.RegisterAll          applies global middleware, mounts every feature's routes
               → <feature>/router        e.g. user's v1 router: group + auth middleware + handlers
                   → handler             parses/validates the request, calls the service
@@ -731,14 +788,16 @@ cmd/api/main.go
 Global middleware order (outermost first — see `internal/router/router.go`):
 
 ```
-TracerDebug → Security → Trace → CORS → Gzip → AccessLog → Recover → Payload → Banner → Limiter → RoutePatterns → (your handler)
+TracerDebug → Security → Trace → CORS → Gzip → AccessLog → Recover → Banner → Limiter → Payload → RoutePatterns → (your handler)
 ```
 
 Each has a reason for its position (documented in code): `TracerDebug` must be outermost so it can
 catch panics re-raised by `Recover` when running in debug mode; `AccessLog` sits inside `Gzip` so it
 logs uncompressed bodies, and outside `Recover` because it only logs once `c.Next()` returns — so a
 panic must be recovered below it to still be logged; `Recover` comes before everything else so a
-panic in `Payload`, `Limiter`, `RoutePatterns` or a handler still gets a JSON 500; `Banner` (on
+panic in `Payload`, `Limiter`, `RoutePatterns` or a handler still gets a JSON 500; `Banner` and
+`Limiter` run before `Payload`, so a banned or rate-limited client never makes the server read and
+parse its body; `Banner` (on
 unless `BANNER_ENABLED=false`) sits before `Limiter` so a banned client never uses up rate-limit
 tokens and repeated 429s count as strikes — it bans a client that requests a scanner-only path such
 as `/.env`, sends an attack payload in the URL or a scanner's User-Agent, or collects `BANNER_MAX_STRIKES` 401/403/404/405/429 responses within
@@ -746,6 +805,11 @@ as `/.env`, sends an attack payload in the URL or a scanner's User-Agent, or col
 memory per instance; `RoutePatterns`
 rejects a malformed `:uuid`, `:id` or `:slug` with 404 before auth or the handler runs — so a param
 named `:id` must always be a positive integer (use another name, e.g. `:key`, for free-form values).
+
+`/uploads` (static files) is registered before that chain: it keeps only `Security` (its
+`nosniff` header matters for user files; `Cross-Origin-Resource-Policy: cross-origin` there, so a
+frontend on another site can embed the images) and `Recover`, and skips gzip, the access log and body
+parsing.
 
 ---
 
@@ -761,14 +825,51 @@ internal/features/user/
 ├── service/          UserService impl — business logic (bcrypt hashing, avatar upload via storage)
 ├── dto/v1/           request/response structs + converters to/from domain.User
 ├── handler/v1/       thin HTTP layer: bind → call service → respond
-├── router/v1/        registers routes on a *gin.RouterGroup, applies middleware.BearerAuth + Guard
-├── command/          feature-scoped console commands (e.g. user:list)
+├── router/v1/        registers routes on a *gin.RouterGroup, applies middleware.Authenticate + Guard
+├── adapter/          implements this feature's ports over another feature (here: SessionRevoker over auth)
 └── module.go         fx.Module wiring the above together + registerTranslations
 ```
 
-Some features also have `infrastructure/`: code that talks to a cache or an outside service
-(e.g. `auth`'s `SessionCache`, `access`'s `PermissionCache`). `make feature` doesn't generate it;
-add it yourself when needed.
+Optional folders: `command/` (background console commands), `infrastructure/` (code that talks to
+a cache or an outside service, e.g. `auth`'s `SessionCache`), `router/private/` (service-to-service
+routes). `make feature` doesn't generate them; add them when needed.
+
+### Conventions every feature follows
+
+The rules below are what makes features look alike; `make feature` generates code that follows
+them, and review checks them.
+
+- **Layers**: `domain` imports no Gin, sqlc or Fx. Repositories map sqlc rows to domain types, so
+  sqlc types never leave them. Services hold the business rules; handlers only bind, call the
+  service and answer through the `Responder`.
+- **Between features**: the feature that *uses* another owns the port (an interface in its
+  `domain/`) and the adapter (`adapter/<other>_adapter.go`). Outside `adapter/`, no package imports
+  another feature. Routers depend on `middleware.Authenticate` and `*middleware.Guard`, never on
+  `auth`. Each feature declares its own errors; an adapter turns the other feature's errors into its own.
+- **Transactions**: a repository exposes `WithTransaction`; a service wraps every flow that writes
+  more than once. The transaction travels in `ctx`, so repositories of other features called inside
+  join it. Invalidate caches after the commit, never inside. Login and refresh, which must lock and
+  decide in one round trip, are PL/pgSQL functions (`database/primary/functions/`).
+- **Errors**: repositories wrap database errors as `"<feature> repository: <operation>: %w"` via
+  `var wrap = database.Wrapper("<feature> repository")` (junkit);
+  domain errors stay matchable with `errors.Is/As`. Log an error in one place only, and never drop
+  one with `_ =` without a comment saying why.
+- **Fx**: constructors are `NewXxx(...) *Xxx`, bound to interfaces with `fx.As`. Up to four
+  untagged dependencies are plain parameters; otherwise a `XxxParams` struct with `fx.In`. One
+  provider per `fx.Provide`. Every `module.go` keeps its `// COMMANDS` marker.
+- **DTOs**: `XxxRequest` / `XxxResponse`, converters `ToXxxInput`, `ToXxxListFilter`,
+  `NewXxxResponse`, `NewXxxResponseList` (with `slicex.Map`). Binding tags carry every limit the
+  database has (length, format), so bad input is a 422, never a 500.
+- **Names**: one verb per operation across layers (`ListUsers` in handler, service and SQL). i18n
+  keys for success messages are `<resource>_<past participle>` (`user_created`); each feature
+  registers the keys it uses. Logs read `"<feature>: <event>"` with snake_case zap fields.
+- **Comments** say why, in a line or two, above the code (never at the end of a line). A comment
+  that names a file or a test must stay true.
+- **Tests**: service tests use Func-field fakes (`CreateFunc`, ...) and `t.Run` cases, named
+  `Test<Type>_<Method>[_<Behaviour>]`. A stateful fake is for flows the database decides (auth).
+- **Migrations**: `NNNNNN_<what>.up.sql` with a matching `.down.sql`; permissions are inserted by
+  migrations, never seeders; seeders hold development demo data only. Tables use the shared
+  `f_set_updated_at()` trigger.
 
 Routes are collected automatically: any type implementing `router.Routes` (optionally also
 `router.Versioned`) that's provided into the `"routes"` Fx group gets mounted by
@@ -786,26 +887,27 @@ Two ways, from fastest to most hands-on.
 ### Option A — generate it (recommended)
 
 `cmd/scaffold` is a code generator (`junkit/scaffold` is the reusable rendering/Fx-registration
-engine; `cmd/scaffold/templates.go` holds this app's actual templates, matching `user`'s layer
-shape exactly):
+engine; `cmd/scaffold/templates.go` holds this app's templates, which follow the
+[conventions](#conventions-every-feature-follows) above):
 
 ```bash
 make feature NAME=product              # or: TABLE=custom_table_name to override the default "products"
+make sqlc                              # generates sqlc/product.sql.go — the feature does not build before
 make migrate-up                        # creates the table and products:read/create/update/delete,
                                        # granted to super_admin (the app refuses to start without them)
-go build ./...
+go build ./... && go test ./internal/features/product/...
 ```
 
-Feature names are lowercase letters and underscores only: they become permission codes, which
-the database checks against `^[a-z_]+:[a-z_]+$`.
+Feature names are lowercase letters and underscores only, and not a Go keyword: they become
+package names and permission codes, which the database checks against `^[a-z_]+:[a-z_]+$`.
 
 This creates:
 
 - a migration (up/down) for the table and its permissions,
-- a `internal/database/primary/queries/product.sql` + hand-written `sqlc/product.sql.go` (same shape as `user.sql.go` —
-  replace with a real `sqlc generate` once you've refined the schema),
+- `internal/database/primary/queries/product.sql`, for `make sqlc` to generate the Go code from,
 - the full `domain/repository/service/dto/handler/router/module` layer set for a generic
-  `name + status` entity,
+  `name + status` entity (status is `"active"` / `"inactive"` in the API, as for users), with a
+  service test,
 - its CRUD permissions (`domain/permission.go`, provided to the `permissions` Fx group by
   `module.go` with their i18n names),
 
@@ -822,31 +924,52 @@ When the generic template doesn't fit:
 
 1. Copy the `user` directory structure, renaming `user` → your feature name throughout.
 2. Add a migration: `make migrate-create NAME=add_<feature>_table`, then `make migrate-up`.
-3. Write the SQL in `internal/database/primary/queries/<feature>.sql` (sqlc-annotated) and either
-   hand-write or `make sqlc` a `internal/database/primary/sqlc/<feature>.sql.go`.
+3. Write the SQL in `internal/database/primary/queries/<feature>.sql` (sqlc-annotated) and run
+   `make sqlc`.
 4. Wire the feature's `Module` into `internal/app/fx.go` next to `user.Module`.
 5. If your routes need protecting, see below.
 
 ### Protecting your routes
 
-Inject `middleware.Authenticator[*authdomain.Identity]` (auth module) and `*middleware.Guard`
-(access module) from `jungo/internal/middleware` into your router, apply `BearerAuth`, and wrap
-every handler with the Guard, same as `user_router.go` does:
+Inject `middleware.Authenticate` (provided by the auth module) and `*middleware.Guard` from
+`jungo/internal/middleware` into your router, put `Authenticate` on the group, and wrap every
+handler with the Guard, same as `user_router.go` does:
 
 ```go
 // router: require a valid access token on every route in this group
-group.Use(middleware.BearerAuth(r.authenticator, r.responder, middleware.BearerAuthOptions{}))
-group.POST("", r.guard.Can(r.handler.CreateProduct, accessdomain.ProductsCreate))
-group.GET("/:uuid", r.guard.Authenticated(r.handler.GetProduct)) // service checks ownership
-
-// handler: who is calling?
-identity := security.MustGetIdentity[*authdomain.Identity](c)
+products := group.Group("/products", gin.HandlerFunc(r.authenticate))
+products.POST("", r.guard.Can(r.handler.CreateProduct, domain.ProductsCreate))
+// The service checks ownership.
+products.GET("/:uuid", r.guard.Authenticated(r.handler.GetProduct))
 
 // service: the caller and their permissions (set by the Guard)
-if err := actor.RequireSelfOrPermission(ctx, ownerUUID, accessdomain.ProductsUpdate); err != nil {
+if err := actor.RequireSelfOrPermission(ctx, ownerUUID, domain.ProductsUpdate); err != nil {
 	return nil, err
 }
 ```
+
+### Documenting your routes
+
+Every route under `/api` must be described in its routes type's `Docs()`, or the app stops at
+startup naming the route; a doc for a route that does not exist stops it too. The generator writes
+`Docs()` for you. Path is relative to the group `Register` receives, as in `BodyLimits`:
+
+```go
+// Docs implements router.Documented.
+func (r *ProductRoutes) Docs() []apidoc.Route {
+	return []apidoc.Route{
+		{Method: http.MethodPost, Path: "/products", Summary: "Create a product",
+			Body: v1dto.CreateProductRequest{}, Status: http.StatusCreated, Response: v1dto.ProductResponse{}},
+		{Method: http.MethodGet, Path: "/products", Summary: "List products",
+			Query: v1dto.ListProductsRequest{}, Response: v1dto.ProductResponse{}, Paginated: true},
+	}
+}
+```
+
+The rest comes from code you already wrote, so the docs cannot drift from it: field names from
+`json`/`form` tags, rules from `binding` (`required`, `min`, `max`, `oneof`, `email`, ...; custom
+rules are listed by name), samples from `example`, and the login and permission each route needs
+from its `Guard` call. `Files: []string{"image"}` documents a multipart upload.
 
 ### Larger request bodies (uploads)
 
@@ -859,7 +982,8 @@ Instead, have your routes type implement `router.BodyLimited`, as `user_router.g
 // BodyLimits implements router.BodyLimited; Path is relative to the group Register receives.
 func (r *ProductRoutes) BodyLimits() []router.BodyLimit {
 	return []router.BodyLimit{
-		{Method: http.MethodPost, Path: "/products/:uuid/image", MaxBytes: 10<<20 + 64<<10}, // file + multipart overhead
+		// The file, plus room for multipart boundaries and headers.
+		{Method: http.MethodPost, Path: "/products/:uuid/image", MaxBytes: 10<<20 + 64<<10},
 	}
 }
 ```
@@ -880,9 +1004,12 @@ helpers a command's `Run` prints through.
 ### Quickest: generate it
 
 ```bash
-make command NAME=health_check SIGNATURE=health:check           # global command
-make command NAME=list_users SIGNATURE=user:list FEATURE=user    # feature-scoped command
+make command NAME=purge_uploads SIGNATURE=storage:purge                  # global command
+make command NAME=send_digest SIGNATURE=user:send-digest FEATURE=user    # feature-scoped command
 ```
+
+`NAME` is snake_case (lowercase letters, digits, underscores). The target `module.go` must keep
+its `// COMMANDS` marker: the generator checks it before writing anything.
 
 ### By hand
 
@@ -891,7 +1018,8 @@ make command NAME=list_users SIGNATURE=user:list FEATURE=user    # feature-scope
    ```go
    // internal/console/command.go
    type Command interface {
-   	Signature() string                        // CLI name, e.g. "user:list"
+   	// Signature is the CLI name, e.g. "auth:cleanup-tokens".
+   	Signature() string
    	Run(ctx context.Context, args []string) error
    }
    ```
@@ -900,9 +1028,9 @@ make command NAME=list_users SIGNATURE=user:list FEATURE=user    # feature-scope
      `internal/console/commands/` — see
      [`health_check_command.go`](internal/console/commands/health_check_command.go).
    - **Feature-scoped** commands live inside the feature they operate on and share its services,
-     under `internal/features/<feature>/command/` — e.g. `user:list`
-     ([`list_users_command.go`](internal/features/user/command/list_users_command.go)) reuses the
-     same `domain.UserService` the HTTP handler calls.
+     under `internal/features/<feature>/command/` — e.g. `auth:cleanup-tokens`
+     ([`cleanup_tokens_command.go`](internal/features/auth/command/cleanup_tokens_command.go))
+     calls the same `domain.AuthService` the HTTP handlers do.
 
 2. Give it a `namespace:verb` signature (e.g. `product:sync`) so it stays discoverable via the
    no-argument command listing.
@@ -913,7 +1041,7 @@ make command NAME=list_users SIGNATURE=user:list FEATURE=user    # feature-scope
    ```go
    fx.Provide(
    	fx.Annotate(
-   		NewListUsersCommand,
+   		command.NewCleanupTokensCommand,
    		fx.As(new(console.Command)),
    		fx.ResultTags(`group:"commands"`),
    	),
@@ -926,11 +1054,11 @@ make command NAME=list_users SIGNATURE=user:list FEATURE=user    # feature-scope
 ### How it's wired
 
 `app.NewConsoleFx()` (`internal/app/fx.go`) builds a separate Fx app that reuses `CoreModules`
-(the same DB/cache/services graph as the API) but swaps `HTTPModules` for:
+(the same DB/cache/services graph as the API) but swaps `HTTPModules` for one option, which
+registers the OnStart hook that dispatches `os.Args[1]`:
 
 ```go
-fx.Provide(console.Module),      // collects every Command into the "commands" Fx group
-fx.Invoke(console.RunSelected),  // registers the OnStart hook that dispatches os.Args[1]
+fx.Invoke(console.RunSelected)
 ```
 
 `console.RunSelected` (`internal/console/kernel.go`) reads `os.Args[1]` as the command's
@@ -945,19 +1073,23 @@ calls its `Run`, then shuts the Fx app down.
 
 `internal/app/fx.go` groups `junkit` packages into two tiers:
 
-- **Core** — `logger`, `database`, `response`, `i18n`, `validation`. The app doesn't build without
-  these.
+- **Core** — `logger`, `database`, `response`, `i18n`, `validation`, `security`. The app doesn't
+  build without these.
 - **Optional** — `cache`, `storage`, `httpclient`, `telegram`, `notification`, `recaptcha`,
-  `tracer`. Each is registered as its own `fx.Module` line; comment one out (and its `Options`
-  provider) and the app still builds — see the comment block above the "OPTIONAL PACKAGES"
-  section in `fx.go` for exactly which ones are safe to remove alone vs. together.
+  `mailer`, listed under "OPTIONAL MODULES & INTEGRATIONS" in `fx.go`, each as its `Options`
+  provider plus its `Module`.
 
-Two optional packages are wired to a real call site in this skeleton and are **not** actually
-removable without further changes:
+Most optional ones have a real call site, so removing one means removing its users too:
 
-- `storage` — the `user` feature's avatar upload depends on it directly.
-- `tracer` — wired into `database/postgres` through a `Decorate` hook (see below), and into
-  `middleware.TracerDebug`.
+- `storage` — the `user` feature's avatar upload.
+- `cache` — `auth`'s session cache and login guard, `access`'s permission cache.
+- `mailer` — `auth`'s password reset (optional there: without it password reset is off).
+- `recaptcha` — `auth`'s login when `AUTH_RECAPTCHA_ON_LOGIN=true` (optional there).
+- `telegram` + `notification` — alerts from `Recover`, `Limiter`, `Banner` and the login guard
+  (optional everywhere).
+
+`tracer` has no Fx module: it is used directly, by `database/postgres` through a `Decorate` hook
+(see below) and by `middleware.TracerDebug`.
 
 ### The `Decorate` hook (why `database` doesn't import `tracer`)
 
@@ -1012,13 +1144,13 @@ API.
 | `middleware` | Gin middleware: CORS, rate limiting, panic recovery, security headers, request tracing, body capture |
 | `scaffold` | Code-generation engine (name-form derivation, templated file writing, Fx registration) behind `cmd/scaffold` — see [13](#13-adding-a-new-feature) |
 
-**Convention:** every package except `pagination`, `middleware`, and `scaffold` exposes a `var
-Module = fx.Module(...)` (or `fx.Provide(...)`) for one-line Fx registration — see how each is
-registered in `internal/app/fx.go`. `pagination` needs no wiring (pure functions); `middleware` is
-deliberately *not* centrally wired — because call sites need differently configured instances
-(e.g. `Limiter` per route group), so its constructors are called directly wherever routes are
-registered (see `internal/router/router.go`). `scaffold` is a build-time CLI dependency, not
-something the running application imports at all.
+**Convention:** the packages the app wires through Fx (`logger`, `database/postgres`, `i18n`,
+`response`, `validation`, `security`, `cache`, `storage`, `telegram`, `notification`, `recaptcha`,
+`mailer`) expose a `var Module` (or a constructor) for one-line registration — see
+`internal/app/fx.go`. The others are used directly: `pagination`, `slicex`, `sqlfmt`, `upload` and
+`console` are plain functions; `middleware` constructors are called where routes are registered,
+because call sites need differently configured instances (e.g. `Limiter` per route group);
+`tracer` is called from code; `scaffold` is a build-time dependency of `cmd/scaffold` only.
 
 ---
 
@@ -1063,9 +1195,9 @@ if !validation.BindQuery(ctx, h.responder, h.validator, &req) {
 }
 req.SetDefaults("created_at", "desc")
 
-users, total, err := h.service.GetUsers(ctx.Request.Context(), req.ToFilter())
+users, total, err := h.service.ListUsers(ctx.Request.Context(), v1dto.ToUserListFilter(req))
 meta := pagination.NewPagination(req.Page, req.PageSize, total)
-h.responder.Pagination(ctx, http.StatusOK, "operation_successful", v1dto.NewUserResponseList(users), meta)
+h.responder.Pagination(ctx, http.StatusOK, "users_listed", v1dto.NewUserResponseList(users), meta)
 ```
 
 ### i18n
@@ -1077,7 +1209,7 @@ Every feature registers its own message keys on the shared `*i18n.Translator` �
 func registerTranslations(translator *i18n.Translator) {
 	translator.AddTranslations(map[string]map[string]string{
 		i18n.LangEN: {
-			"user_not_found": "User not found",
+			"user_created": "User created successfully",
 		},
 	})
 }
@@ -1093,10 +1225,10 @@ way handlers write to the HTTP response:
 
 ```go
 // single resource
-h.responder.SendWithData(ctx, http.StatusOK, "operation_successful", v1dto.NewUserResponse(user))
+h.responder.SendWithData(ctx, http.StatusOK, "user_retrieved", v1dto.NewUserResponse(user))
 
 // list + pagination metadata
-h.responder.Pagination(ctx, http.StatusOK, "operation_successful", users, meta)
+h.responder.Pagination(ctx, http.StatusOK, "users_listed", users, meta)
 
 // domain/validation error → correct HTTP status + localized message, automatically
 h.responder.Error(ctx, err)
@@ -1178,11 +1310,14 @@ Real usage from [`internal/features/user/service/user_service.go`](internal/feat
 implementation:
 
 ```go
-func NewUserService(repo domain.UserRepository, storageService storage.Service) *UserService {
-	return &UserService{repo: repo, storage: storageService}
+type UserServiceParams struct {
+	fx.In
+
+	Storage storage.Service
+	// ...
 }
 
-func (s *UserService) UploadAvatar(ctx context.Context, id uuid.UUID, file domain.AvatarFile) (*domain.User, error) {
+func (s *UserService) UploadAvatar(ctx context.Context, uid uuid.UUID, file domain.AvatarFile) (*domain.User, error) {
 	newURL, err := s.storage.UploadFile(ctx, file.Reader, file.Filename)
 	// ...
 }
@@ -1190,20 +1325,23 @@ func (s *UserService) UploadAvatar(ctx context.Context, id uuid.UUID, file domai
 
 ### cache
 
-Not called from this skeleton (no feature needs caching yet). This app still registers
-`cache.Module`, which resolves a `cache.Cache[T]` — depend on the interface and let config decide
-the backend (Redis when `CACHE_REDIS_ENABLE=true`, otherwise a no-op that always calls the loader):
+Config decides the backend: Redis when `CACHE_REDIS_ENABLED=true`, otherwise a no-op that always
+calls the loader (`cache.Module` provides that `*cache.Store`; `b.OrMemory()` gives in-memory counters instead, for throttling that must work
+without Redis). Data that changes must be invalidated, not just deleted: a reader that loaded the
+old row before your write could store it back after it. `cache.Invalidatable` closes that gap with
+invalidation markers. Real usage, from
+[`internal/features/access/infrastructure/permission_cache.go`](internal/features/access/infrastructure/permission_cache.go),
+behind a port in the feature's `domain/`, TTL from config:
 
 ```go
-type UserService struct {
-	users cache.Cache[*domain.User]
-}
+entries := cache.NewInvalidatable[[]string](b, cfg.Auth.PermissionCacheTTL)
 
-func (s *UserService) GetUser(ctx context.Context, id uuid.UUID) (*domain.User, error) {
-	return s.users.GetOrSet(ctx, "user:"+id.String(), 5*time.Minute, func() (*domain.User, error) {
-		return s.repo.GetByUUID(ctx, id)
-	})
-}
+perms, _, err := entries.GetOrLoad(ctx, entryKey(userID),
+	func([]string) []string { return []string{userInvalidationKey(userID)} },
+	load)
+
+// After the transaction that changed the user's roles commits:
+err = entries.Invalidate(ctx, userInvalidationKey(userID))
 ```
 
 ### httpclient
@@ -1225,24 +1363,25 @@ Not called from this skeleton's routes directly, but wired into `junkit/middlewa
 rate-limit breaches and new bans:
 
 ```go
-middleware.Recover(logger, notifier, responder, middleware.RecoverOptions{ /* ... */ })
+middleware.Recover(middleware.RecoverOptions{ /* ... */ }, logger, notifier, responder)
 ```
 
 `notifier` is `notification.Notifier`, itself built from a `telegram.Client` — send an alert
 manually the same way:
 
 ```go
-notifier.SendMessageHTML(ctx, "<b>Deploy finished</b>", "info")
+notifier.Send(ctx, notification.LevelWarning, "<b>Deploy finished</b>")
 ```
 
 ### recaptcha
 
-Not called from this skeleton (no form needs bot protection yet). Verify a token from a handler:
+Called by `auth`'s login when `AUTH_RECAPTCHA_ON_LOGIN=true` (see `AuthService.Login`). Verify a
+token the same way elsewhere:
 
 ```go
-if err := recaptchaClient.Verify(ctx, req.RecaptchaToken, ctx.ClientIP()); err != nil {
-	responder.Error(ctx, err) // score too low / verification failed
-	return
+if err := s.recaptcha.Verify(ctx, meta.RecaptchaToken, meta.IPAddress); err != nil {
+	// Score too low, or the verification failed.
+	return nil, domain.ErrRecaptchaFailed
 }
 ```
 
@@ -1252,15 +1391,15 @@ development and tests never need a real Google token.
 ### tracer
 
 Powers the [`?t_debug=` dashboard](#7-live-debug-dashboard) — the `postgres.Options.Decorate`
-hook in `internal/app/fx.go` already captures every SQL query automatically. To add your own
+hook in `internal/database/primary/db.go` already captures every SQL query automatically. To add your own
 breakpoint-style annotations visible in that same dashboard, call the package-level helpers
 anywhere a `context.Context` (or `*gin.Context`) is available:
 
 ```go
-tracer.C(ctx, "about to charge the customer")
-tracer.V(ctx, "input", input)
+tracer.Comment(ctx, "about to charge the customer")
+tracer.Var(ctx, "input", input)
 if err != nil {
-	tracer.E(ctx, "charge failed", err)
+	tracer.Error(ctx, "charge failed", err)
 }
 ```
 
@@ -1287,30 +1426,28 @@ tracer.Measure(ctx, "Charge Payment Provider", func() {
 ```
 
 Spans nest (call one inside another) and the dashboard shows each one's exclusive time and its
-share of the total request time. Like `tracer.C`/`V`/`E`, both are no-ops outside an active debug
+share of the total request time. Like `tracer.Comment`/`Var`/`Error`, both are no-ops outside an active debug
 request, so it's safe to leave them in permanently.
 
 ### middleware
 
-Real usage — the full global chain from
-[`internal/router/router.go`](internal/router/router.go)'s `registerGlobalMiddlewares`:
+Real usage — the global chain is built in
+[`internal/router/router.go`](internal/router/router.go)'s `registerGlobalMiddlewares`, each
+constructor taking its own `Options` filled from config, in this shape:
 
 ```go
-r.Router.Use(
-	middleware.TracerDebug(debug), // TracerDebugOptions: ?t_debug=… + X-Internal-Secret header
-	middleware.Security(),
+p.Router.Use(
+	// ?t_debug=… plus the X-Internal-Secret header.
+	middleware.TracerDebug(debug),
+	middleware.Security(middleware.SecurityOptions{ForceHSTS: cfg.Security.ForceHSTS}),
 	middleware.Trace(middleware.TraceOptions{Version: cfg.Version, Environment: cfg.Environment}),
-	middleware.CORS(middleware.CORSOptions{AllowOrigins: cfg.CORS.AllowOrigins}),
+	middleware.CORS(middleware.CORSOptions{AllowOrigins: cfg.CORS.AllowOrigins /* ... */}),
 	middleware.Gzip(middleware.GzipOptions{Level: gzip.BestSpeed}),
-	middleware.AccessLog(r.HTTPLogger, middleware.AccessLogOptions{SkipIf: debug.Matches}),
-	middleware.Recover(r.HTTPLogger, r.Notifier, r.Responder, middleware.RecoverOptions{Debug: debug}),
-	// RouteLimits: per-route larger limits collected from router.BodyLimited routes.
-	middleware.Payload(middleware.PayloadOptions{MaxBodySize: cfg.Security.MaxRequestBodySize, RouteLimits: bodyLimits}, r.Responder),
-	// Added only when BANNER_ENABLED (the default); Redis when enabled, otherwise memory.
-	middleware.Banner(middleware.BannerOptions{Cache: cache.New[int64](r.CacheOptions.OrMemory()), MaxStrikes: 30, StrikeWindow: time.Minute, BanDurations: banDurations}, r.LimiterLogger, r.Responder, r.Notifier),
-	middleware.Limiter(middleware.LimiterOptions{RequestsPerSecond: 10, Burst: 30}, r.LimiterLogger, r.Responder, r.Notifier),
-	middleware.RoutePatterns(map[string]func(string) bool{"uuid": middleware.IsUUID, "id": middleware.IsID, "slug": middleware.IsSlug}, r.Responder),
+	middleware.AccessLog(middleware.AccessLogOptions{SkipIf: debug.Matches}, p.HTTPLogger),
+	middleware.Recover(middleware.RecoverOptions{Debug: debug}, p.HTTPLogger, p.Notifier, p.Responder),
 )
+// Banner (when BANNER_ENABLED), then Limiter, then Payload and RoutePatterns, with
+// cfg.Banner.* / cfg.Limiter.* / cfg.Security.MaxRequestBodySize.
 ```
 
 Each constructor takes its own `Options` (no shared Fx module) so a route group needing a

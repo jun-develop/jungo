@@ -39,8 +39,9 @@ services:
       POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
       POSTGRES_DB: ${DB_NAME:-jungo}
       PGPORT: ${DB_PORT:-5432}
+    # Bound to localhost: reachable by `make migrate-up` and local tools, not by the network.
     ports:
-      - "${DB_PORT:-5432}:${DB_PORT:-5432}"
+      - "127.0.0.1:${DB_PORT:-5432}:${DB_PORT:-5432}"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -60,7 +61,7 @@ services:
     image: redis:7-alpine
     profiles: ["cache", "full"]
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
@@ -74,13 +75,14 @@ services:
           memory: 256M
           cpus: "0.25"
 
-  # Enable with: make app-dev WITH=mail (for a local Telegram-alert stand-in / SMTP testing)
+  # Enable with: make app-dev WITH=mail. A local SMTP server (MAIL_DRIVER=smtp, MAIL_SMTP_HOST=mailpit,
+  # MAIL_SMTP_PORT=1025, MAIL_SMTP_ALLOW_PLAINTEXT=true: Mailpit has no TLS); read the emails at http://localhost:8025.
   mailpit:
     image: axllent/mailpit
     profiles: ["mail", "full"]
     ports:
-      - "8025:8025"
-      - "1025:1025"
+      - "127.0.0.1:8025:8025"
+      - "127.0.0.1:1025:1025"
     restart: unless-stopped
     deploy:
       resources:

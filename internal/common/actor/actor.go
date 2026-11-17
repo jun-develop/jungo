@@ -9,8 +9,11 @@ import (
 	"github.com/jun-develop/junkit/response"
 )
 
-// ErrForbidden is returned when the actor lacks the permission an action needs.
-var ErrForbidden = response.New(response.Forbidden, "insufficient_permission")
+// Errors the actor checks return.
+var (
+	ErrForbidden                = response.New(response.Forbidden, "insufficient_permission")
+	ErrCannotManageStrongerUser = response.New(response.Forbidden, "cannot_manage_stronger_user")
+)
 
 // Actor is the authenticated user of a request and the permission codes they hold.
 type Actor struct {
@@ -24,9 +27,9 @@ func (a *Actor) Has(permission string) bool {
 	return slices.Contains(a.Permissions, permission)
 }
 
-// Is reports whether the actor is the user uid.
-func (a *Actor) Is(uid uuid.UUID) bool {
-	return a.UserUUID == uid
+// Is reports whether the actor is the user userUUID.
+func (a *Actor) Is(userUUID uuid.UUID) bool {
+	return a.UserUUID == userUUID
 }
 
 // actorKey is the private context key for the Actor.
@@ -43,11 +46,11 @@ func From(ctx context.Context) (*Actor, bool) {
 	return a, ok && a != nil
 }
 
-// RequireSelfOrPermission allows the actor when they are uid or hold permission. A context without
-// an actor is denied, so a service method called outside a guarded route fails closed.
-func RequireSelfOrPermission(ctx context.Context, uid uuid.UUID, permission string) error {
+// RequireSelfOrPermission allows the actor when they are userUUID or hold permission. A context
+// without an actor is denied, so a service method called outside a guarded route fails closed.
+func RequireSelfOrPermission(ctx context.Context, userUUID uuid.UUID, permission string) error {
 	a, ok := From(ctx)
-	if !ok || (!a.Is(uid) && !a.Has(permission)) {
+	if !ok || (!a.Is(userUUID) && !a.Has(permission)) {
 		return ErrForbidden
 	}
 
@@ -70,6 +73,12 @@ type PermissionReader interface {
 	GetUserPermissions(ctx context.Context, userID int64) ([]string, error)
 }
 
+// TargetPermissionReader reads the permission codes of an actor and of the user they act on, in
+// one round trip, from the database.
+type TargetPermissionReader interface {
+	GetActorAndTargetPermissions(ctx context.Context, actorID, targetID int64) (actor, target []string, err error)
+}
+
 // Reload re-reads the actor's permissions from the database instead of the cached copy, and returns
 // ErrForbidden if ctx has no actor or they no longer hold permission. Use it before granting or
 // revoking access.
@@ -86,6 +95,32 @@ func Reload(ctx context.Context, r PermissionReader, permission string) ([]strin
 
 	if !slices.Contains(held, permission) {
 		return nil, ErrForbidden
+	}
+
+	return held, nil
+}
+
+// RequireManage allows the actor to act on the user targetID: read from the database, they must
+// still hold permission and every permission the target holds, so no one manages a stronger user.
+// It returns the actor's permissions. Lock the target's row first, so role changes committed
+// meanwhile are seen.
+func RequireManage(ctx context.Context, r TargetPermissionReader, targetID int64, permission string) ([]string, error) {
+	a, ok := From(ctx)
+	if !ok {
+		return nil, ErrForbidden
+	}
+
+	held, target, err := r.GetActorAndTargetPermissions(ctx, a.UserID, targetID)
+	if err != nil {
+		return nil, err
+	}
+
+	if !slices.Contains(held, permission) {
+		return nil, ErrForbidden
+	}
+
+	if !Covers(held, target) {
+		return nil, ErrCannotManageStrongerUser
 	}
 
 	return held, nil

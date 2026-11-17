@@ -18,7 +18,8 @@ import (
 // deviceIDHeader carries the client's stable device identifier (optional).
 const deviceIDHeader = "X-Device-ID"
 
-// AuthHandler adapts HTTP requests to domain.AuthService calls.
+// AuthHandler adapts HTTP requests to domain.AuthService calls. It serves the internal
+// (service-to-service) routes too: they share the token DTOs and need no version of their own.
 type AuthHandler struct {
 	service   domain.AuthService
 	responder response.Responder
@@ -43,7 +44,7 @@ func (h *AuthHandler) Login(ctx *gin.Context) {
 		return
 	}
 
-	h.responder.SendWithData(ctx, http.StatusOK, "login_success", v1dto.NewTokenPairResponse(pair, time.Now()))
+	h.responder.SendWithData(ctx, http.StatusOK, "logged_in", v1dto.NewTokenPairResponse(pair, time.Now()))
 }
 
 // Refresh handles POST /auth/refresh. The refresh token is read from the body only.
@@ -59,7 +60,7 @@ func (h *AuthHandler) Refresh(ctx *gin.Context) {
 		return
 	}
 
-	h.responder.SendWithData(ctx, http.StatusOK, "refresh_success", v1dto.NewTokenPairResponse(pair, time.Now()))
+	h.responder.SendWithData(ctx, http.StatusOK, "token_refreshed", v1dto.NewTokenPairResponse(pair, time.Now()))
 }
 
 // ForgotPassword handles POST /auth/forgot-password. The response is the same whether or not the
@@ -90,7 +91,7 @@ func (h *AuthHandler) ResetPassword(ctx *gin.Context) {
 		return
 	}
 
-	h.responder.Send(ctx, http.StatusOK, "password_reset_success")
+	h.responder.Send(ctx, http.StatusOK, "password_reset_completed")
 }
 
 // Logout handles POST /auth/logout.
@@ -102,7 +103,7 @@ func (h *AuthHandler) Logout(ctx *gin.Context) {
 		return
 	}
 
-	h.responder.Send(ctx, http.StatusOK, "logout_success")
+	h.responder.Send(ctx, http.StatusOK, "logged_out")
 }
 
 // LogoutAll handles POST /auth/logout-all.
@@ -114,7 +115,7 @@ func (h *AuthHandler) LogoutAll(ctx *gin.Context) {
 		return
 	}
 
-	h.responder.Send(ctx, http.StatusOK, "logout_all_success")
+	h.responder.Send(ctx, http.StatusOK, "logged_out_all")
 }
 
 // Me handles GET /auth/me.
@@ -130,8 +131,8 @@ func (h *AuthHandler) Me(ctx *gin.Context) {
 	h.responder.SendWithData(ctx, http.StatusOK, "profile_retrieved", v1dto.NewMeResponse(identity.Session, permissions, time.Now()))
 }
 
-// Sessions handles GET /auth/sessions.
-func (h *AuthHandler) Sessions(ctx *gin.Context) {
+// ListSessions handles GET /auth/sessions.
+func (h *AuthHandler) ListSessions(ctx *gin.Context) {
 	identity := security.MustGetIdentity[*domain.Identity](ctx)
 
 	items, err := h.service.ListSessions(ctx.Request.Context(), identity)
@@ -171,7 +172,7 @@ func (h *AuthHandler) Revoke(ctx *gin.Context) {
 		return
 	}
 
-	h.responder.Send(ctx, http.StatusOK, "token_revoked_success")
+	h.responder.Send(ctx, http.StatusOK, "session_revoked")
 }
 
 // RevokeAll handles POST /internal/auth/revoke-all.
@@ -186,7 +187,7 @@ func (h *AuthHandler) RevokeAll(ctx *gin.Context) {
 		return
 	}
 
-	h.responder.Send(ctx, http.StatusOK, "tokens_revoked_all_success")
+	h.responder.Send(ctx, http.StatusOK, "sessions_revoked")
 }
 
 // clientMetadata extracts the client description stored with issued tokens.

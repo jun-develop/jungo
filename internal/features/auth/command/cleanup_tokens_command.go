@@ -3,6 +3,7 @@ package command
 import (
 	"context"
 	"flag"
+	"fmt"
 	"time"
 
 	"github.com/jun-develop/junkit/console"
@@ -11,7 +12,8 @@ import (
 	"jungo/internal/features/auth/domain"
 )
 
-// CleanupTokensCommand deletes tokens expired or revoked before the retention window.
+// CleanupTokensCommand deletes tokens expired or revoked before the retention window. Exchanged
+// refresh tokens stay until they would have expired, so their reuse is still detected.
 //
 // Usage:
 //
@@ -42,7 +44,7 @@ func (c *CleanupTokensCommand) Run(ctx context.Context, args []string) error {
 
 	deleted, err := c.authService.CleanupTokens(ctx, *retention)
 	if err != nil {
-		return err
+		return fmt.Errorf("cleanup tokens: %w", err)
 	}
 
 	console.Successf("Deleted %d auth tokens expired or revoked before %s", deleted, time.Now().Add(-*retention).Format(time.DateTime))

@@ -24,7 +24,7 @@ func (f *fakeMailer) Send(_ context.Context, msg mailer.Message) error {
 
 // withPasswordReset configures password reset with a real mail driver and the given mailer.
 func withPasswordReset(m *fakeMailer) envOption {
-	return func(cfg *config.Config, p *Params) {
+	return func(cfg *config.Config, p *AuthServiceParams) {
 		cfg.Auth.PasswordResetURL = "https://app.example.com/reset-password?lang=vi"
 		cfg.Auth.PasswordResetTTL = 30 * time.Minute
 		cfg.Auth.PasswordResetWindow = time.Hour
@@ -76,7 +76,7 @@ func tokenFrom(t *testing.T, msg mailer.Message) string {
 	return u.Query().Get("token")
 }
 
-func TestPasswordReset_FullFlow(t *testing.T) {
+func TestAuthService_PasswordReset_FullFlow(t *testing.T) {
 	m := newMailer()
 	e := newTestEnv(t, withPasswordReset(m))
 	ctx := context.Background()
@@ -111,7 +111,7 @@ func TestPasswordReset_FullFlow(t *testing.T) {
 	wantErr(t, e.svc.ResetPassword(ctx, token, "Another-passw0rd!"), domain.ErrInvalidResetToken)
 }
 
-func TestForgotPassword_UnknownAndInactiveEmailsLookTheSame(t *testing.T) {
+func TestAuthService_ForgotPassword_UnknownAndInactiveEmailsLookTheSame(t *testing.T) {
 	m := newMailer()
 	e := newTestEnv(t, withPasswordReset(m))
 
@@ -127,7 +127,7 @@ func TestForgotPassword_UnknownAndInactiveEmailsLookTheSame(t *testing.T) {
 	noMail(t, m)
 }
 
-func TestForgotPassword_NewerLinkReplacesOlder(t *testing.T) {
+func TestAuthService_ForgotPassword_NewerLinkReplacesOlder(t *testing.T) {
 	m := newMailer()
 	e := newTestEnv(t, withPasswordReset(m))
 	ctx := context.Background()
@@ -143,7 +143,7 @@ func TestForgotPassword_NewerLinkReplacesOlder(t *testing.T) {
 	}
 }
 
-func TestResetPassword_ExpiredAndGarbageTokens(t *testing.T) {
+func TestAuthService_ResetPassword_ExpiredAndGarbageTokens(t *testing.T) {
 	m := newMailer()
 	e := newTestEnv(t, withPasswordReset(m))
 	ctx := context.Background()
@@ -157,7 +157,7 @@ func TestResetPassword_ExpiredAndGarbageTokens(t *testing.T) {
 	wantErr(t, e.svc.ResetPassword(ctx, token, "New-passw0rd!"), domain.ErrInvalidResetToken)
 }
 
-func TestResetPassword_TooLongPasswordKeepsToken(t *testing.T) {
+func TestAuthService_ResetPassword_TooLongPasswordKeepsToken(t *testing.T) {
 	m := newMailer()
 	e := newTestEnv(t, withPasswordReset(m))
 	ctx := context.Background()
@@ -171,7 +171,7 @@ func TestResetPassword_TooLongPasswordKeepsToken(t *testing.T) {
 	}
 }
 
-func TestForgotPassword_ThrottlesPerEmailAndPerIP(t *testing.T) {
+func TestAuthService_ForgotPassword_ThrottlesPerEmailAndPerIP(t *testing.T) {
 	m := newMailer()
 	e := newTestEnv(t, withPasswordReset(m))
 	ctx := context.Background()
@@ -196,11 +196,11 @@ func TestForgotPassword_ThrottlesPerEmailAndPerIP(t *testing.T) {
 	wantErr(t, e.svc.ForgotPassword(ctx, "other@example.com", browser), domain.ErrTooManyResetRequests)
 }
 
-func TestForgotPassword_UnavailableWithoutEmailSetup(t *testing.T) {
+func TestAuthService_ForgotPassword_UnavailableWithoutEmailSetup(t *testing.T) {
 	cases := map[string]envOption{
-		"no reset url": func(cfg *config.Config, _ *Params) { cfg.Auth.PasswordResetURL = "" },
-		"no mailer":    func(_ *config.Config, p *Params) { p.Mailer = nil },
-		"log driver outside development": func(cfg *config.Config, _ *Params) {
+		"no reset url": func(cfg *config.Config, _ *AuthServiceParams) { cfg.Auth.PasswordResetURL = "" },
+		"no mailer":    func(_ *config.Config, p *AuthServiceParams) { p.Mailer = nil },
+		"log driver outside development": func(cfg *config.Config, _ *AuthServiceParams) {
 			cfg.Mail.Driver = string(mailer.DriverLog)
 		},
 	}
@@ -213,9 +213,9 @@ func TestForgotPassword_UnavailableWithoutEmailSetup(t *testing.T) {
 	}
 }
 
-func TestForgotPassword_LogDriverAllowedInDevelopment(t *testing.T) {
+func TestAuthService_ForgotPassword_LogDriverAllowedInDevelopment(t *testing.T) {
 	m := newMailer()
-	e := newTestEnv(t, withPasswordReset(m), func(cfg *config.Config, _ *Params) {
+	e := newTestEnv(t, withPasswordReset(m), func(cfg *config.Config, _ *AuthServiceParams) {
 		cfg.Mail.Driver = string(mailer.DriverLog)
 		cfg.Environment = "development"
 	})

@@ -74,7 +74,7 @@ func (h *UserHandler) ListUsers(ctx *gin.Context) {
 
 	req.SetDefaults("created_at", "desc")
 
-	users, total, err := h.service.GetUsers(ctx.Request.Context(), req.ToFilter())
+	users, total, err := h.service.ListUsers(ctx.Request.Context(), v1dto.ToUserListFilter(req))
 	if err != nil {
 		h.responder.Error(ctx, err)
 		return

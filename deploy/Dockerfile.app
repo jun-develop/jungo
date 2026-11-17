@@ -40,10 +40,9 @@ RUN apk add --no-cache ca-certificates && \
 WORKDIR /app
 COPY --from=builder /app/bin/api ./api
 COPY --from=builder /app/bin/console ./console
-COPY --from=builder /app/internal/database/primary/migrations ./internal/database/primary/migrations
 RUN mkdir -p storage/uploads storage/logs && chown -R appuser:appgroup /app
 USER appuser
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD wget -qO- http://localhost:8080/health || exit 1
+    CMD wget -qO- "http://localhost:${API_SERVER_PORT:-8080}/health" || exit 1
 ENTRYPOINT ["./api"]

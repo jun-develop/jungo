@@ -1,26 +1,10 @@
--- name: GetUserPermissions :many
-SELECT DISTINCT rp.permission_code
-FROM user_roles ur
-JOIN role_permissions rp ON rp.role_id = ur.role_id
-WHERE ur.user_id = $1
-ORDER BY rp.permission_code;
+-- name: GetUserPermissions :one
+SELECT f_user_permissions($1)::text[] AS permissions;
 
 -- name: GetActorAndTargetPermissions :one
 -- Both users' codes in one round trip, for "may the actor manage the target" checks.
-SELECT ARRAY(
-           SELECT DISTINCT rp.permission_code
-           FROM user_roles ur
-           JOIN role_permissions rp ON rp.role_id = ur.role_id
-           WHERE ur.user_id = sqlc.arg(actor_id)
-           ORDER BY rp.permission_code
-       )::text[] AS actor_permissions,
-       ARRAY(
-           SELECT DISTINCT rp.permission_code
-           FROM user_roles ur
-           JOIN role_permissions rp ON rp.role_id = ur.role_id
-           WHERE ur.user_id = sqlc.arg(target_id)
-           ORDER BY rp.permission_code
-       )::text[] AS target_permissions;
+SELECT f_user_permissions(sqlc.arg(actor_id))::text[]  AS actor_permissions,
+       f_user_permissions(sqlc.arg(target_id))::text[] AS target_permissions;
 
 -- name: ListPermissions :many
 SELECT code, group_code FROM permissions ORDER BY group_code, code;
@@ -30,14 +14,18 @@ INSERT INTO roles (code, name) VALUES ($1, $2)
 RETURNING *;
 
 -- name: ListRoles :many
--- Every role, or only those in uuids when it is not null, with permissions and user count.
+-- Every role, or only those in uuids when it is not null, with permissions; user_count is counted
+-- only when count_users is true (0 otherwise), so lookups made under a lock skip the count.
 SELECT
     r.id, r.uuid, r.code, r.name, r.is_system, r.created_at, r.updated_at,
     COALESCE(
         (SELECT array_agg(rp.permission_code ORDER BY rp.permission_code) FROM role_permissions rp WHERE rp.role_id = r.id),
         '{}'
     )::text[] AS permissions,
-    (SELECT count(*) FROM user_roles ur WHERE ur.role_id = r.id) AS user_count
+    CASE WHEN sqlc.arg(count_users)::boolean
+         THEN (SELECT count(*) FROM user_roles ur WHERE ur.role_id = r.id)
+         ELSE 0
+    END::bigint AS user_count
 FROM roles r
 WHERE sqlc.narg(uuids)::uuid[] IS NULL OR r.uuid = ANY(sqlc.narg(uuids)::uuid[])
 ORDER BY r.is_system DESC, r.code;
@@ -62,7 +50,7 @@ SELECT sqlc.arg(role_id)::bigint, unnest(sqlc.arg(codes)::text[])
 ON CONFLICT DO NOTHING;
 
 -- name: ListUserIDsByRole :many
-SELECT user_id FROM user_roles WHERE role_id = $1;
+SELECT user_id FROM user_roles WHERE role_id = sqlc.arg(role_id) LIMIT sqlc.arg(max_rows);
 
 -- name: ListUserRoles :many
 SELECT r.* FROM roles r

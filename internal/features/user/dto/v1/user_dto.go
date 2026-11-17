@@ -15,7 +15,7 @@ import (
 type CreateUserRequest struct {
 	FirstName   string  `json:"first_name" binding:"required,min=2,max=50"`
 	LastName    string  `json:"last_name" binding:"required,min=2,max=50"`
-	Email       string  `json:"email" binding:"required,email,email_advanced"`
+	Email       string  `json:"email" binding:"required,max=150,email,email_advanced"`
 	Password    string  `json:"password" binding:"required,min=8,max=72,password_strong"`
 	PhoneNumber *string `json:"phone_number" binding:"omitempty,phone_advanced"`
 }
@@ -62,13 +62,13 @@ type ListUsersRequest struct {
 	pagination.Request
 }
 
-// ToFilter converts ListUsersRequest to domain filter.
-func (r *ListUsersRequest) ToFilter() domain.UserListFilter {
+// ToUserListFilter converts ListUsersRequest to domain filter.
+func ToUserListFilter(req ListUsersRequest) domain.UserListFilter {
 	return domain.UserListFilter{
-		Search:    r.Search,
-		Limit:     r.GetLimit(),
-		Offset:    r.GetOffset(),
-		SortOrder: r.SortOrder,
+		Search:    req.Search,
+		Limit:     req.GetLimit(),
+		Offset:    req.GetOffset(),
+		SortOrder: req.SortOrder,
 	}
 }
 

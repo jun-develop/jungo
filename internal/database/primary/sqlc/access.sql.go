@@ -102,20 +102,8 @@ func (q *Queries) DeleteUserNonSystemRoles(ctx context.Context, userID int64) er
 }
 
 const getActorAndTargetPermissions = `-- name: GetActorAndTargetPermissions :one
-SELECT ARRAY(
-           SELECT DISTINCT rp.permission_code
-           FROM user_roles ur
-           JOIN role_permissions rp ON rp.role_id = ur.role_id
-           WHERE ur.user_id = $1
-           ORDER BY rp.permission_code
-       )::text[] AS actor_permissions,
-       ARRAY(
-           SELECT DISTINCT rp.permission_code
-           FROM user_roles ur
-           JOIN role_permissions rp ON rp.role_id = ur.role_id
-           WHERE ur.user_id = $2
-           ORDER BY rp.permission_code
-       )::text[] AS target_permissions
+SELECT f_user_permissions($1)::text[]  AS actor_permissions,
+       f_user_permissions($2)::text[] AS target_permissions
 `
 
 type GetActorAndTargetPermissionsParams struct {
@@ -136,32 +124,15 @@ func (q *Queries) GetActorAndTargetPermissions(ctx context.Context, arg GetActor
 	return i, err
 }
 
-const getUserPermissions = `-- name: GetUserPermissions :many
-SELECT DISTINCT rp.permission_code
-FROM user_roles ur
-JOIN role_permissions rp ON rp.role_id = ur.role_id
-WHERE ur.user_id = $1
-ORDER BY rp.permission_code
+const getUserPermissions = `-- name: GetUserPermissions :one
+SELECT f_user_permissions($1)::text[] AS permissions
 `
 
-func (q *Queries) GetUserPermissions(ctx context.Context, userID int64) ([]string, error) {
-	rows, err := q.db.Query(ctx, getUserPermissions, userID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []string{}
-	for rows.Next() {
-		var permission_code string
-		if err := rows.Scan(&permission_code); err != nil {
-			return nil, err
-		}
-		items = append(items, permission_code)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
+func (q *Queries) GetUserPermissions(ctx context.Context, pUserID int64) ([]string, error) {
+	row := q.db.QueryRow(ctx, getUserPermissions, pUserID)
+	var permissions []string
+	err := row.Scan(&permissions)
+	return permissions, err
 }
 
 const listPermissions = `-- name: ListPermissions :many
@@ -200,11 +171,19 @@ SELECT
         (SELECT array_agg(rp.permission_code ORDER BY rp.permission_code) FROM role_permissions rp WHERE rp.role_id = r.id),
         '{}'
     )::text[] AS permissions,
-    (SELECT count(*) FROM user_roles ur WHERE ur.role_id = r.id) AS user_count
+    CASE WHEN $1::boolean
+         THEN (SELECT count(*) FROM user_roles ur WHERE ur.role_id = r.id)
+         ELSE 0
+    END::bigint AS user_count
 FROM roles r
-WHERE $1::uuid[] IS NULL OR r.uuid = ANY($1::uuid[])
+WHERE $2::uuid[] IS NULL OR r.uuid = ANY($2::uuid[])
 ORDER BY r.is_system DESC, r.code
 `
+
+type ListRolesParams struct {
+	CountUsers bool        `db:"count_users" json:"count_users"`
+	Uuids      []uuid.UUID `db:"uuids" json:"uuids"`
+}
 
 type ListRolesRow struct {
 	ID          int64      `db:"id" json:"id"`
@@ -218,9 +197,10 @@ type ListRolesRow struct {
 	UserCount   int64      `db:"user_count" json:"user_count"`
 }
 
-// Every role, or only those in uuids when it is not null, with permissions and user count.
-func (q *Queries) ListRoles(ctx context.Context, uuids []uuid.UUID) ([]ListRolesRow, error) {
-	rows, err := q.db.Query(ctx, listRoles, uuids)
+// Every role, or only those in uuids when it is not null, with permissions; user_count is counted
+// only when count_users is true (0 otherwise), so lookups made under a lock skip the count.
+func (q *Queries) ListRoles(ctx context.Context, arg ListRolesParams) ([]ListRolesRow, error) {
+	rows, err := q.db.Query(ctx, listRoles, arg.CountUsers, arg.Uuids)
 	if err != nil {
 		return nil, err
 	}
@@ -250,11 +230,16 @@ func (q *Queries) ListRoles(ctx context.Context, uuids []uuid.UUID) ([]ListRoles
 }
 
 const listUserIDsByRole = `-- name: ListUserIDsByRole :many
-SELECT user_id FROM user_roles WHERE role_id = $1
+SELECT user_id FROM user_roles WHERE role_id = $1 LIMIT $2
 `
 
-func (q *Queries) ListUserIDsByRole(ctx context.Context, roleID int64) ([]int64, error) {
-	rows, err := q.db.Query(ctx, listUserIDsByRole, roleID)
+type ListUserIDsByRoleParams struct {
+	RoleID  int64 `db:"role_id" json:"role_id"`
+	MaxRows int32 `db:"max_rows" json:"max_rows"`
+}
+
+func (q *Queries) ListUserIDsByRole(ctx context.Context, arg ListUserIDsByRoleParams) ([]int64, error) {
+	rows, err := q.db.Query(ctx, listUserIDsByRole, arg.RoleID, arg.MaxRows)
 	if err != nil {
 		return nil, err
 	}

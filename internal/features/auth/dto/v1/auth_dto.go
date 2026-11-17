@@ -5,6 +5,8 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/jun-develop/junkit/slicex"
+
 	"jungo/internal/features/auth/domain"
 )
 
@@ -38,7 +40,7 @@ type ResetPasswordRequest struct {
 	Password string `json:"password" binding:"required,min=8,max=72,password_strong"`
 }
 
-// TokenRequest is the request body for the internal token endpoints.
+// TokenRequest is the request body for the internal token endpoints (/api/internal/auth/*).
 type TokenRequest struct {
 	Token string `json:"token" binding:"required,max=512"`
 }
@@ -63,8 +65,8 @@ func NewTokenPairResponse(p *domain.TokenPair, now time.Time) TokenPairResponse 
 	}
 }
 
-// UserInfo is the user part of a session response.
-type UserInfo struct {
+// SessionUserResponse is the user part of a session response.
+type SessionUserResponse struct {
 	UUID      uuid.UUID `json:"uuid"`
 	Email     string    `json:"email"`
 	FirstName string    `json:"first_name"`
@@ -73,8 +75,8 @@ type UserInfo struct {
 	Active    bool      `json:"active"`
 }
 
-// SessionInfo is the client/session part of a session response.
-type SessionInfo struct {
+// SessionClientResponse is the client/session part of a session response.
+type SessionClientResponse struct {
 	FamilyUUID uuid.UUID `json:"family_uuid"`
 	IPAddress  *string   `json:"ip_address"`
 	UserAgent  *string   `json:"user_agent"`
@@ -82,8 +84,8 @@ type SessionInfo struct {
 	CreatedAt  time.Time `json:"created_at"`
 }
 
-// TokenInfo describes one token of a session. Token hashes are never exposed.
-type TokenInfo struct {
+// TokenStateResponse describes one token of a session. Token hashes are never exposed.
+type TokenStateResponse struct {
 	UUID      uuid.UUID  `json:"uuid"`
 	ExpiresAt time.Time  `json:"expires_at"`
 	RevokedAt *time.Time `json:"revoked_at,omitempty"`
@@ -92,16 +94,16 @@ type TokenInfo struct {
 
 // SessionResponse represents a session with its user and tokens (GET /auth/me, token details).
 type SessionResponse struct {
-	User         UserInfo    `json:"user"`
-	Session      SessionInfo `json:"session"`
-	AccessToken  TokenInfo   `json:"access_token"`
-	RefreshToken TokenInfo   `json:"refresh_token"`
+	User         SessionUserResponse   `json:"user"`
+	Session      SessionClientResponse `json:"session"`
+	AccessToken  TokenStateResponse    `json:"access_token"`
+	RefreshToken TokenStateResponse    `json:"refresh_token"`
 }
 
 // NewSessionResponse converts domain.Session to SessionResponse.
 func NewSessionResponse(s *domain.Session, now time.Time) SessionResponse {
 	return SessionResponse{
-		User: UserInfo{
+		User: SessionUserResponse{
 			UUID:      s.UserUUID,
 			Email:     s.Email,
 			FirstName: s.FirstName,
@@ -109,15 +111,15 @@ func NewSessionResponse(s *domain.Session, now time.Time) SessionResponse {
 			AvatarURL: s.AvatarURL,
 			Active:    s.UserActive,
 		},
-		Session: SessionInfo{
+		Session: SessionClientResponse{
 			FamilyUUID: s.FamilyUUID,
 			IPAddress:  s.IPAddress,
 			UserAgent:  s.UserAgent,
 			DeviceID:   s.DeviceID,
 			CreatedAt:  s.CreatedAt,
 		},
-		AccessToken:  newTokenInfo(s.Access, now),
-		RefreshToken: newTokenInfo(s.Refresh, now),
+		AccessToken:  newTokenStateResponse(s.Access, now),
+		RefreshToken: newTokenStateResponse(s.Refresh, now),
 	}
 }
 
@@ -155,36 +157,34 @@ func NewTokenDetailsResponse(d *domain.TokenDetails, now time.Time) TokenDetails
 
 // SessionSummaryResponse represents one entry of GET /auth/sessions.
 type SessionSummaryResponse struct {
-	FamilyUUID uuid.UUID  `json:"family_uuid"`
-	IPAddress  *string    `json:"ip_address"`
-	UserAgent  *string    `json:"user_agent"`
-	DeviceID   *string    `json:"device_id"`
-	CreatedAt  time.Time  `json:"created_at"`
-	UpdatedAt  *time.Time `json:"updated_at,omitempty"`
-	ExpiresAt  time.Time  `json:"expires_at"`
-	Current    bool       `json:"current"`
+	FamilyUUID uuid.UUID `json:"family_uuid"`
+	IPAddress  *string   `json:"ip_address"`
+	UserAgent  *string   `json:"user_agent"`
+	DeviceID   *string   `json:"device_id"`
+	CreatedAt  time.Time `json:"created_at"`
+	ExpiresAt  time.Time `json:"expires_at"`
+	Current    bool      `json:"current"`
+}
+
+// NewSessionSummaryResponse converts domain.SessionSummary to SessionSummaryResponse.
+func NewSessionSummaryResponse(m *domain.SessionSummary) SessionSummaryResponse {
+	return SessionSummaryResponse{
+		FamilyUUID: m.FamilyUUID,
+		IPAddress:  m.IPAddress,
+		UserAgent:  m.UserAgent,
+		DeviceID:   m.DeviceID,
+		CreatedAt:  m.CreatedAt,
+		ExpiresAt:  m.ExpiresAt,
+		Current:    m.Current,
+	}
 }
 
 // NewSessionSummaryResponseList converts a slice of domain.SessionSummary to its response list.
 func NewSessionSummaryResponseList(items []*domain.SessionSummary) []SessionSummaryResponse {
-	responses := make([]SessionSummaryResponse, len(items))
-	for i, m := range items {
-		responses[i] = SessionSummaryResponse{
-			FamilyUUID: m.FamilyUUID,
-			IPAddress:  m.IPAddress,
-			UserAgent:  m.UserAgent,
-			DeviceID:   m.DeviceID,
-			CreatedAt:  m.CreatedAt,
-			UpdatedAt:  m.UpdatedAt,
-			ExpiresAt:  m.ExpiresAt,
-			Current:    m.Current,
-		}
-	}
-
-	return responses
+	return slicex.Map(items, NewSessionSummaryResponse)
 }
 
-// newTokenInfo converts domain.TokenState to TokenInfo.
-func newTokenInfo(t domain.TokenState, now time.Time) TokenInfo {
-	return TokenInfo{UUID: t.UUID, ExpiresAt: t.ExpiresAt, RevokedAt: t.RevokedAt, Status: t.Status(now)}
+// newTokenStateResponse converts domain.TokenState to TokenStateResponse.
+func newTokenStateResponse(t domain.TokenState, now time.Time) TokenStateResponse {
+	return TokenStateResponse{UUID: t.UUID, ExpiresAt: t.ExpiresAt, RevokedAt: t.RevokedAt, Status: t.Status(now)}
 }

@@ -8,7 +8,7 @@
 --   invalid_type  the token is an access token
 --   user_inactive the user is not active
 --   reused        the token was already exchanged: the whole session is revoked
---   revoked       the token was revoked for another reason
+--   revoked       the token was revoked for another reason, or exchanged moments ago
 --   expired       the token has expired
 -- The status names and revoked reasons match the Go constants in
 -- internal/features/auth/domain/auth.go.
@@ -32,6 +32,7 @@ RETURNS TABLE (
 LANGUAGE plpgsql
 AS $$
 DECLARE
+    v_reuse_grace    CONSTANT INTERVAL := '10 seconds';
     v_user_id        BIGINT;
     v_family_uuid    UUID;
     v_type           SMALLINT;
@@ -43,7 +44,7 @@ DECLARE
     v_user_active    BOOLEAN;
 BEGIN
     -- Lock the token so two concurrent refreshes with it run one after the other: the second
-    -- sees it already exchanged and is treated as reuse.
+    -- sees it already exchanged. users.status 1 = active.
     SELECT t.user_id, t.family_uuid, t.type, t.device_id, t.expires_at, t.revoked_at, t.revoked_reason,
            u.uuid, u.status = 1
     INTO v_user_id, v_family_uuid, v_type, v_device_id, v_expires_at, v_revoked_at, v_revoked_reason,
@@ -58,6 +59,7 @@ BEGIN
         RETURN;
     END IF;
 
+    -- Token types: 1 = access, 2 = refresh.
     IF v_type <> 2 THEN
         RETURN QUERY SELECT 'invalid_type'::TEXT, v_family_uuid, v_user_uuid;
         RETURN;
@@ -68,8 +70,14 @@ BEGIN
         RETURN;
     END IF;
 
-    -- An already exchanged token used again means it may be stolen: end the whole session.
-    IF v_revoked_reason = 'refresh' THEN
+    -- An exchanged token used again means it may be stolen: end the whole session. A retry within
+    -- v_reuse_grace (two tabs refreshing at once) only fails, so it does not log the user out.
+    IF v_revoked_reason IN ('refresh', 'rotated') THEN
+        IF v_revoked_at > now() - v_reuse_grace THEN
+            RETURN QUERY SELECT 'revoked'::TEXT, v_family_uuid, v_user_uuid;
+            RETURN;
+        END IF;
+
         UPDATE auth_tokens t
         SET revoked_at = now(), revoked_reason = 'reuse'
         WHERE t.family_uuid = v_family_uuid

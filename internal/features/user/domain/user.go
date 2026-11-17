@@ -21,6 +21,7 @@ const (
 	UserStatusNameInactive = "inactive"
 )
 
+// userStatusNames maps each status code to its API name.
 var userStatusNames = map[int16]string{
 	UserStatusActive:   UserStatusNameActive,
 	UserStatusInactive: UserStatusNameInactive,
@@ -80,15 +81,21 @@ type Credentials struct {
 	Status       int16
 }
 
-// SessionRevoker ends a user's login sessions; implemented by the auth feature.
+// SessionRevoker ends a user's login sessions; implemented over the auth feature.
 type SessionRevoker interface {
-	RevokeUserSessions(ctx context.Context, uid uuid.UUID) error
+	// RevokeUserSessions revokes the user's sessions in the database, inside the transaction in ctx.
+	RevokeUserSessions(ctx context.Context, userUUID uuid.UUID) error
+
+	// InvalidateUserSessions drops the user's cached sessions; call it after the transaction
+	// commits, also when only their profile (name, avatar) changed.
+	InvalidateUserSessions(ctx context.Context, userUUID uuid.UUID)
 }
 
-// PermissionReader reads permission codes from the database, never a cache; implemented by the
-// access feature.
-type PermissionReader interface {
-	GetActorAndTargetPermissions(ctx context.Context, actorID, targetID int64) (actor, target []string, err error)
+// CredentialStore reads and replaces login credentials. It has no authorization check, so only the
+// auth feature uses it; it is kept out of UserService for that reason.
+type CredentialStore interface {
+	GetCredentialsByEmail(ctx context.Context, email string) (*Credentials, error)
+	SetPasswordHash(ctx context.Context, userID int64, passwordHash string) error
 }
 
 // CreateUserInput holds data for creating a user.
@@ -123,7 +130,6 @@ type UserRepository interface {
 	WithTransaction(ctx context.Context, fn func(ctx context.Context) error) error
 	Create(ctx context.Context, input CreateUserInput, passwordHash string) (*User, error)
 	GetByUUID(ctx context.Context, uid uuid.UUID) (*User, error)
-	GetByEmail(ctx context.Context, email string) (*User, error)
 	GetCredentialsByEmail(ctx context.Context, email string) (*Credentials, error)
 	UpdatePassword(ctx context.Context, id int64, passwordHash string) error
 	List(ctx context.Context, filter UserListFilter) ([]*User, int64, error)
@@ -137,9 +143,7 @@ type UserRepository interface {
 type UserService interface {
 	CreateUser(ctx context.Context, input CreateUserInput) (*User, error)
 	GetUser(ctx context.Context, uid uuid.UUID) (*User, error)
-	GetCredentialsByEmail(ctx context.Context, email string) (*Credentials, error)
-	SetPasswordHash(ctx context.Context, id int64, passwordHash string) error
-	GetUsers(ctx context.Context, filter UserListFilter) ([]*User, int64, error)
+	ListUsers(ctx context.Context, filter UserListFilter) ([]*User, int64, error)
 	UpdateUser(ctx context.Context, uid uuid.UUID, input UpdateUserInput) (*User, error)
 	DeleteUser(ctx context.Context, uid uuid.UUID) error
 	UploadAvatar(ctx context.Context, uid uuid.UUID, file AvatarFile) (*User, error)

@@ -2,7 +2,6 @@
 -- USERS TABLE
 -- =============================================================================
 
-CREATE EXTENSION IF NOT EXISTS pgcrypto;
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 
 CREATE TABLE IF NOT EXISTS users (
@@ -23,9 +22,8 @@ CREATE TABLE IF NOT EXISTS users (
     CONSTRAINT chk_users_email_lowercase CHECK (email = lower(email))
 );
 
-CREATE INDEX IF NOT EXISTS idx_users_email ON users (email);
-CREATE INDEX IF NOT EXISTS idx_users_created_at ON users (created_at);
-CREATE INDEX IF NOT EXISTS idx_users_deleted_at ON users (deleted_at);
+-- ListUsers pages active users by (created_at, id).
+CREATE INDEX IF NOT EXISTS idx_users_active_created_at ON users (created_at, id) WHERE deleted_at IS NULL;
 
 -- Email is unique only among non-deleted rows, so a deleted user's email can
 -- be registered again.
@@ -37,19 +35,43 @@ CREATE INDEX IF NOT EXISTS idx_users_email_trgm ON users USING gin (email gin_tr
 CREATE INDEX IF NOT EXISTS idx_users_first_name_trgm ON users USING gin (first_name gin_trgm_ops) WHERE deleted_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_users_last_name_trgm ON users USING gin (last_name gin_trgm_ops) WHERE deleted_at IS NULL;
 
--- =============================================================================
--- updated_at trigger
--- =============================================================================
-
-CREATE OR REPLACE FUNCTION f_set_users_updated_at()
-RETURNS TRIGGER AS $$
-BEGIN
-    NEW.updated_at = now();
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
 CREATE TRIGGER trg_users_updated_at
     BEFORE UPDATE ON users
     FOR EACH ROW
-    EXECUTE FUNCTION f_set_users_updated_at();
+    EXECUTE FUNCTION f_set_updated_at();
+
+-- =============================================================================
+-- USER_ROLES TABLE (here, not in 000001_access, because it needs the users table)
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS user_roles (
+    user_id    BIGINT NOT NULL,
+    role_id    BIGINT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    PRIMARY KEY (user_id, role_id),
+    CONSTRAINT fk_user_roles_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE,
+    CONSTRAINT fk_user_roles_role FOREIGN KEY (role_id) REFERENCES roles (id) ON DELETE CASCADE
+);
+
+-- Finds a role's users when its permissions change (permission cache invalidation).
+CREATE INDEX IF NOT EXISTS idx_user_roles_role ON user_roles (role_id);
+
+-- =============================================================================
+-- PERMISSIONS
+-- The codes in internal/features/user/domain/permission.go, granted to super_admin.
+-- =============================================================================
+
+INSERT INTO permissions (code, group_code) VALUES
+    ('users:read',   'users'),
+    ('users:create', 'users'),
+    ('users:update', 'users'),
+    ('users:delete', 'users')
+ON CONFLICT (code) DO NOTHING;
+
+INSERT INTO role_permissions (role_id, permission_code)
+SELECT r.id, p.code
+FROM roles r
+JOIN permissions p ON p.code IN ('users:read', 'users:create', 'users:update', 'users:delete')
+WHERE r.code = 'super_admin'
+ON CONFLICT DO NOTHING;

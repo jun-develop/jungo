@@ -138,31 +138,69 @@ func (q *Queries) GetUserIDByUUID(ctx context.Context, argUuid uuid.UUID) (int64
 	return id, err
 }
 
-const listUsers = `-- name: ListUsers :many
+const listUsersNewest = `-- name: ListUsersNewest :many
 SELECT id, uuid, email, password_hash, first_name, last_name, phone_number, avatar_url, status, created_at, updated_at, deleted_at FROM users
 WHERE deleted_at IS NULL
   AND ($1::text = '' OR email ILIKE '%' || $1 || '%' OR first_name ILIKE '%' || $1 || '%' OR last_name ILIKE '%' || $1 || '%')
-ORDER BY
-    CASE WHEN $2::text = 'asc' THEN created_at END ASC,
-    CASE WHEN $2::text = 'desc' OR $2::text = '' THEN created_at END DESC
-LIMIT $4 OFFSET $3
+ORDER BY created_at DESC, id DESC
+LIMIT $3 OFFSET $2
 `
 
-type ListUsersParams struct {
-	Search    string `db:"search" json:"search"`
-	SortOrder string `db:"sort_order" json:"sort_order"`
-	Offset    int32  `db:"offset" json:"offset"`
-	Limit     int32  `db:"limit" json:"limit"`
+type ListUsersNewestParams struct {
+	Search string `db:"search" json:"search"`
+	Offset int32  `db:"offset" json:"offset"`
+	Limit  int32  `db:"limit" json:"limit"`
 }
 
-// No count(*) OVER(): it makes Postgres read and sort every matching row to return one page.
-func (q *Queries) ListUsers(ctx context.Context, arg ListUsersParams) ([]User, error) {
-	rows, err := q.db.Query(ctx, listUsers,
-		arg.Search,
-		arg.SortOrder,
-		arg.Offset,
-		arg.Limit,
-	)
+func (q *Queries) ListUsersNewest(ctx context.Context, arg ListUsersNewestParams) ([]User, error) {
+	rows, err := q.db.Query(ctx, listUsersNewest, arg.Search, arg.Offset, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []User{}
+	for rows.Next() {
+		var i User
+		if err := rows.Scan(
+			&i.ID,
+			&i.UUID,
+			&i.Email,
+			&i.PasswordHash,
+			&i.FirstName,
+			&i.LastName,
+			&i.PhoneNumber,
+			&i.AvatarURL,
+			&i.Status,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.DeletedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listUsersOldest = `-- name: ListUsersOldest :many
+SELECT id, uuid, email, password_hash, first_name, last_name, phone_number, avatar_url, status, created_at, updated_at, deleted_at FROM users
+WHERE deleted_at IS NULL
+  AND ($1::text = '' OR email ILIKE '%' || $1 || '%' OR first_name ILIKE '%' || $1 || '%' OR last_name ILIKE '%' || $1 || '%')
+ORDER BY created_at, id
+LIMIT $3 OFFSET $2
+`
+
+type ListUsersOldestParams struct {
+	Search string `db:"search" json:"search"`
+	Offset int32  `db:"offset" json:"offset"`
+	Limit  int32  `db:"limit" json:"limit"`
+}
+
+func (q *Queries) ListUsersOldest(ctx context.Context, arg ListUsersOldestParams) ([]User, error) {
+	rows, err := q.db.Query(ctx, listUsersOldest, arg.Search, arg.Offset, arg.Limit)
 	if err != nil {
 		return nil, err
 	}

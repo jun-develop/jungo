@@ -9,14 +9,18 @@ SELECT * FROM users WHERE uuid = $1 AND deleted_at IS NULL;
 -- name: GetUserByEmail :one
 SELECT * FROM users WHERE email = $1 AND deleted_at IS NULL;
 
--- name: ListUsers :many
--- No count(*) OVER(): it makes Postgres read and sort every matching row to return one page.
+-- name: ListUsersNewest :many
 SELECT * FROM users
 WHERE deleted_at IS NULL
   AND (sqlc.arg(search)::text = '' OR email ILIKE '%' || sqlc.arg(search) || '%' OR first_name ILIKE '%' || sqlc.arg(search) || '%' OR last_name ILIKE '%' || sqlc.arg(search) || '%')
-ORDER BY
-    CASE WHEN sqlc.arg(sort_order)::text = 'asc' THEN created_at END ASC,
-    CASE WHEN sqlc.arg(sort_order)::text = 'desc' OR sqlc.arg(sort_order)::text = '' THEN created_at END DESC
+ORDER BY created_at DESC, id DESC
+LIMIT sqlc.arg('limit') OFFSET sqlc.arg('offset');
+
+-- name: ListUsersOldest :many
+SELECT * FROM users
+WHERE deleted_at IS NULL
+  AND (sqlc.arg(search)::text = '' OR email ILIKE '%' || sqlc.arg(search) || '%' OR first_name ILIKE '%' || sqlc.arg(search) || '%' OR last_name ILIKE '%' || sqlc.arg(search) || '%')
+ORDER BY created_at, id
 LIMIT sqlc.arg('limit') OFFSET sqlc.arg('offset');
 
 -- name: CountUsers :one

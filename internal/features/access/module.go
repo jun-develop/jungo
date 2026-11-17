@@ -8,6 +8,7 @@ import (
 
 	"github.com/jun-develop/junkit/i18n"
 
+	"jungo/internal/common/actor"
 	"jungo/internal/features/access/adapter"
 	"jungo/internal/features/access/domain"
 	v1handler "jungo/internal/features/access/handler/v1"
@@ -15,7 +16,6 @@ import (
 	"jungo/internal/features/access/repository"
 	v1route "jungo/internal/features/access/router/v1"
 	"jungo/internal/features/access/service"
-	userdomain "jungo/internal/features/user/domain"
 	"jungo/internal/middleware"
 	"jungo/internal/router"
 )
@@ -26,7 +26,7 @@ var Module = fx.Module("access",
 		fx.Annotate(
 			repository.NewAccessRepository,
 			fx.As(new(domain.AccessRepository)),
-			fx.As(new(userdomain.PermissionReader)),
+			fx.As(new(actor.TargetPermissionReader)),
 		),
 	),
 	fx.Provide(
@@ -41,7 +41,7 @@ var Module = fx.Module("access",
 			fx.As(new(domain.PermissionCache)),
 		),
 	),
-	// Permission codes this feature checks; NewAccessService receives every feature's codes.
+	// Permission codes this feature checks; AccessService receives every feature's codes.
 	fx.Provide(
 		fx.Annotate(
 			func() []string { return domain.Permissions },
@@ -51,13 +51,10 @@ var Module = fx.Module("access",
 	fx.Provide(
 		fx.Annotate(
 			service.NewAccessService,
-			fx.ParamTags(``, ``, ``, ``, `group:"permissions"`),
 			fx.As(new(domain.AccessService)),
 			fx.As(new(middleware.PermissionLoader)),
 		),
 	),
-	// Permission guard shared with other features' routers.
-	fx.Provide(middleware.NewGuard),
 	fx.Provide(v1handler.NewAccessHandler),
 	fx.Provide(
 		fx.Annotate(
@@ -67,12 +64,19 @@ var Module = fx.Module("access",
 		),
 	),
 
+	// =============================================================================
+	// COMMANDS
+	// =============================================================================
+
 	fx.Invoke(registerTranslations),
-	fx.Invoke(registerPermissionCheck),
 )
 
-// registerPermissionCheck stops the app on start when a permission a feature uses is missing from
-// the database. It only reads: the app never writes permissions.
+// PermissionCheck stops the API server on start when a permission a feature uses is missing from
+// the database. The console leaves it out, so db:migrate can run before the permissions exist.
+var PermissionCheck = fx.Invoke(registerPermissionCheck)
+
+// registerPermissionCheck adds the OnStart hook PermissionCheck describes. It only reads: the app
+// never writes permissions.
 func registerPermissionCheck(lc fx.Lifecycle, svc domain.AccessService) {
 	lc.Append(fx.Hook{
 		OnStart: func(ctx context.Context) error {
@@ -97,12 +101,13 @@ func registerTranslations(translator *i18n.Translator) {
 			"role_deleted":                   "Role deleted successfully",
 			"user_roles_listed":              "User roles listed successfully",
 			"user_roles_updated":             "User roles updated successfully",
+			"user_not_found":                 "User not found",
+			"cannot_manage_stronger_user":    "This user holds permissions you do not hold yourself",
 			"cannot_grant_unheld_permission": "This change involves a permission you do not hold yourself",
 			"role_not_found":                 "Role not found",
 			"role_already_exists":            "A role with this code already exists",
 			"system_role_immutable":          "System roles cannot be changed",
 			"cannot_change_own_roles":        "You cannot change your own roles",
-			"cannot_manage_stronger_user":    "This user holds permissions you do not hold yourself",
 			"unknown_permission":             "Unknown permission",
 			"invalid_role_code":              "Role code must use lowercase letters and underscores",
 			"invalid_role_name":              "Role name is required",

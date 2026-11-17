@@ -28,7 +28,7 @@ func (r *UserRepository) WithTransaction(ctx context.Context, fn func(ctx contex
 	return r.db.WithTransaction(ctx, fn)
 }
 
-// Create implements domain.UserRepository.
+// Create implements domain.UserRepository; new users are active.
 func (r *UserRepository) Create(ctx context.Context, input domain.CreateUserInput, passwordHash string) (*domain.User, error) {
 	row, err := r.db.Queries(ctx).CreateUser(ctx, sqlc.CreateUserParams{
 		Email:        input.Email,
@@ -39,9 +39,9 @@ func (r *UserRepository) Create(ctx context.Context, input domain.CreateUserInpu
 		Status:       domain.UserStatusActive,
 	})
 	if err != nil {
-		return nil, database.Match(err, map[database.ErrorType]error{
+		return nil, wrap("create", database.Match(err, map[database.ErrorType]error{
 			database.ErrorUniqueViolation: domain.ErrEmailAlreadyExists,
-		})
+		}))
 	}
 
 	return mapUser(row), nil
@@ -51,17 +51,7 @@ func (r *UserRepository) Create(ctx context.Context, input domain.CreateUserInpu
 func (r *UserRepository) GetByUUID(ctx context.Context, uid uuid.UUID) (*domain.User, error) {
 	row, err := r.db.Queries(ctx).GetUserByUUID(ctx, uid)
 	if err != nil {
-		return nil, database.MatchNotFound(err, domain.ErrUserNotFound)
-	}
-
-	return mapUser(row), nil
-}
-
-// GetByEmail implements domain.UserRepository.
-func (r *UserRepository) GetByEmail(ctx context.Context, email string) (*domain.User, error) {
-	row, err := r.db.Queries(ctx).GetUserByEmail(ctx, email)
-	if err != nil {
-		return nil, database.MatchNotFound(err, domain.ErrUserNotFound)
+		return nil, wrap("get by uuid", database.MatchNotFound(err, domain.ErrUserNotFound))
 	}
 
 	return mapUser(row), nil
@@ -71,7 +61,7 @@ func (r *UserRepository) GetByEmail(ctx context.Context, email string) (*domain.
 func (r *UserRepository) GetCredentialsByEmail(ctx context.Context, email string) (*domain.Credentials, error) {
 	row, err := r.db.Queries(ctx).GetUserByEmail(ctx, email)
 	if err != nil {
-		return nil, database.MatchNotFound(err, domain.ErrUserNotFound)
+		return nil, wrap("get credentials", database.MatchNotFound(err, domain.ErrUserNotFound))
 	}
 
 	return &domain.Credentials{
@@ -89,7 +79,7 @@ func (r *UserRepository) GetCredentialsByEmail(ctx context.Context, email string
 func (r *UserRepository) UpdatePassword(ctx context.Context, id int64, passwordHash string) error {
 	n, err := r.db.Queries(ctx).UpdateUserPassword(ctx, sqlc.UpdateUserPasswordParams{ID: id, PasswordHash: passwordHash})
 	if err != nil {
-		return err
+		return wrap("update password", err)
 	}
 
 	if n == 0 {
@@ -104,14 +94,16 @@ func (r *UserRepository) List(ctx context.Context, filter domain.UserListFilter)
 	queries := r.db.Queries(ctx)
 	search := database.EscapeLike(filter.Search)
 
-	rows, err := queries.ListUsers(ctx, sqlc.ListUsersParams{
-		Limit:     filter.Limit,
-		Offset:    filter.Offset,
-		Search:    search,
-		SortOrder: filter.SortOrder,
-	})
+	var rows []sqlc.User
+	var err error
+	if filter.SortOrder == "asc" {
+		rows, err = queries.ListUsersOldest(ctx, sqlc.ListUsersOldestParams{Search: search, Limit: filter.Limit, Offset: filter.Offset})
+	} else {
+		rows, err = queries.ListUsersNewest(ctx, sqlc.ListUsersNewestParams{Search: search, Limit: filter.Limit, Offset: filter.Offset})
+	}
+
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, wrap("list", err)
 	}
 
 	users := slicex.Map(rows, mapUser)
@@ -123,7 +115,7 @@ func (r *UserRepository) List(ctx context.Context, filter domain.UserListFilter)
 
 	total, err := queries.CountUsers(ctx, search)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, wrap("count", err)
 	}
 
 	return users, total, nil
@@ -140,7 +132,7 @@ func (r *UserRepository) Update(ctx context.Context, uid uuid.UUID, input domain
 		Status:      input.Status,
 	})
 	if err != nil {
-		return nil, database.MatchNotFound(err, domain.ErrUserNotFound)
+		return nil, wrap("update", database.MatchNotFound(err, domain.ErrUserNotFound))
 	}
 
 	return mapUser(row), nil
@@ -148,12 +140,12 @@ func (r *UserRepository) Update(ctx context.Context, uid uuid.UUID, input domain
 
 // Delete implements domain.UserRepository; it soft-deletes via deleted_at.
 func (r *UserRepository) Delete(ctx context.Context, uid uuid.UUID) error {
-	rowsAffected, err := r.db.Queries(ctx).DeleteUser(ctx, uid)
+	n, err := r.db.Queries(ctx).DeleteUser(ctx, uid)
 	if err != nil {
-		return err
+		return wrap("delete", err)
 	}
 
-	if rowsAffected == 0 {
+	if n == 0 {
 		return domain.ErrUserNotFound
 	}
 
@@ -164,7 +156,7 @@ func (r *UserRepository) Delete(ctx context.Context, uid uuid.UUID) error {
 func (r *UserRepository) GetIDByUUID(ctx context.Context, uid uuid.UUID) (int64, error) {
 	id, err := r.db.Queries(ctx).GetUserIDByUUID(ctx, uid)
 	if err != nil {
-		return 0, database.MatchNotFound(err, domain.ErrUserNotFound)
+		return 0, wrap("get id", database.MatchNotFound(err, domain.ErrUserNotFound))
 	}
 
 	return id, nil
@@ -175,7 +167,7 @@ func (r *UserRepository) GetIDByUUID(ctx context.Context, uid uuid.UUID) (int64,
 func (r *UserRepository) LockByUUID(ctx context.Context, uid uuid.UUID) (int64, error) {
 	id, err := r.db.Queries(ctx).LockUserByUUID(ctx, uid)
 	if err != nil {
-		return 0, database.MatchNotFound(err, domain.ErrUserNotFound)
+		return 0, wrap("lock", database.MatchNotFound(err, domain.ErrUserNotFound))
 	}
 
 	return id, nil
@@ -195,3 +187,6 @@ func mapUser(row sqlc.User) *domain.User {
 		UpdatedAt:   row.UpdatedAt,
 	}
 }
+
+// wrap adds the failed operation to err; domain errors stay matchable with errors.Is/As.
+var wrap = database.Wrapper("user repository")

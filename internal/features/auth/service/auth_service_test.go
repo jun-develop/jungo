@@ -3,12 +3,14 @@ package service
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"go.uber.org/fx/fxtest"
 	"go.uber.org/zap"
 	"golang.org/x/crypto/bcrypt"
 
@@ -16,9 +18,9 @@ import (
 	"github.com/jun-develop/junkit/security"
 
 	"jungo/internal/config"
-	"jungo/internal/features/auth/adapter"
 	"jungo/internal/features/auth/domain"
 	"jungo/internal/features/auth/infrastructure"
+	useradapter "jungo/internal/features/user/adapter"
 )
 
 const testPassword = "correct-horse-battery"
@@ -109,6 +111,11 @@ func (r *fakeRepository) SetPasswordHash(_ context.Context, userID int64, passwo
 	return nil
 }
 
+// WithTransaction runs fn directly: the fake has no rollback.
+func (r *fakeRepository) WithTransaction(ctx context.Context, fn func(ctx context.Context) error) error {
+	return fn(ctx)
+}
+
 func (r *fakeRepository) CreatePasswordResetToken(_ context.Context, userID int64, hash string, expiresAt time.Time) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -158,27 +165,16 @@ func (r *fakeRepository) CreateLoginSession(_ context.Context, p domain.NewSessi
 	}
 
 	if existing != uuid.Nil {
-		active := r.activeInFamily(existing)
-		if len(active) == 2 {
-			for _, t := range active {
-				t.uuid = uuid.New()
-				t.hash, t.expiresAt = p.AccessHash, p.AccessExpiresAt
-				if t.typ == domain.TokenTypeRefresh {
-					t.hash, t.expiresAt = p.RefreshHash, p.RefreshExpiresAt
-				}
-
-				t.ip, t.ua, t.updatedAt = p.IPAddress, p.UserAgent, &now
-			}
-
-			return &domain.LoginSessionResult{FamilyUUID: existing, StaleFamilyUUID: existing}, nil
-		}
-
 		r.revokeFamilyLocked(existing, "rotated")
+		p.FamilyUUID = existing
+		r.insertPairLocked(p)
+
+		return &domain.LoginSessionResult{FamilyUUID: existing, StaleFamilyUUID: existing}, nil
 	}
 
 	r.insertPairLocked(p)
 
-	return &domain.LoginSessionResult{FamilyUUID: p.FamilyUUID, StaleFamilyUUID: existing}, nil
+	return &domain.LoginSessionResult{FamilyUUID: p.FamilyUUID}, nil
 }
 
 // RefreshSession mirrors f_auth_refresh_session.
@@ -199,7 +195,9 @@ func (r *fakeRepository) RefreshSession(_ context.Context, hash string, p domain
 		result.Status = domain.RefreshInvalidType
 	case !u.active:
 		result.Status = domain.RefreshUserInactive
-	case t.reason != nil && *t.reason == domain.RevokedReasonRefresh:
+	case exchanged(t) && t.revokedAt.After(r.now().Add(-reuseGrace)):
+		result.Status = domain.RefreshRevoked
+	case exchanged(t):
 		r.revokeFamilyLocked(t.family, domain.RevokedReasonReuse)
 		result.Status = domain.RefreshReused
 	case t.revokedAt != nil:
@@ -262,21 +260,16 @@ func (r *fakeRepository) GetSessionByHash(_ context.Context, hash string) (*doma
 	}, nil
 }
 
-func (r *fakeRepository) GetTokenByHash(_ context.Context, hash string) (*domain.StoredToken, error) {
+func (r *fakeRepository) GetTokenTypeByHash(_ context.Context, hash string) (domain.TokenType, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	t := r.byHash(hash)
 	if t == nil || r.users[t.userID] == nil || r.users[t.userID].deleted {
-		return nil, domain.ErrTokenNotFound
+		return 0, domain.ErrTokenNotFound
 	}
 
-	u := r.users[t.userID]
-
-	return &domain.StoredToken{
-		UUID: t.uuid, UserID: t.userID, UserUUID: u.uuid, UserActive: u.active, FamilyUUID: t.family,
-		Type: t.typ, DeviceID: t.deviceID, ExpiresAt: t.expiresAt, RevokedAt: t.revokedAt, RevokedReason: t.reason,
-	}, nil
+	return t.typ, nil
 }
 
 func (r *fakeRepository) RevokeFamily(_ context.Context, family uuid.UUID, reason string) error {
@@ -375,7 +368,9 @@ func (r *fakeRepository) CleanupTokens(_ context.Context, before time.Time) (int
 	kept := r.tokens[:0]
 	var deleted int64
 	for _, t := range r.tokens {
-		protected := live[t.family] && (t == first[t.family] || t == lastAccess[t.family])
+		// An exchanged refresh token stays until it would have expired, so its reuse is detected.
+		protected := live[t.family] && (t == first[t.family] || t == lastAccess[t.family]) ||
+			t.typ == domain.TokenTypeRefresh && exchanged(t) && now.Before(t.expiresAt)
 		if !protected && (t.expiresAt.Before(before) || (t.revokedAt != nil && t.revokedAt.Before(before))) {
 			deleted++
 			continue
@@ -445,6 +440,14 @@ func (r *fakeRepository) byHash(hash string) *fakeToken {
 	return nil
 }
 
+// reuseGrace mirrors f_auth_refresh_session's v_reuse_grace.
+const reuseGrace = 10 * time.Second
+
+// exchanged reports whether t was retired by a refresh or a re-login (its reuse is suspicious).
+func exchanged(t *fakeToken) bool {
+	return t.reason != nil && (*t.reason == domain.RevokedReasonRefresh || *t.reason == "rotated")
+}
+
 // sameClient mirrors f_auth_login_session's IP match: an IPv6 address by its /64.
 func sameClient(a, b *string) bool {
 	if a == nil || b == nil {
@@ -495,7 +498,7 @@ type testEnv struct {
 	user   *fakeUser
 }
 
-type envOption func(*config.Config, *Params)
+type envOption func(*config.Config, *AuthServiceParams)
 
 func newTestEnv(t *testing.T, opts ...envOption) *testEnv {
 	t.Helper()
@@ -508,7 +511,6 @@ func newTestEnv(t *testing.T, opts ...envOption) *testEnv {
 		LoginBlockWindow:       15 * time.Minute,
 		LoginBlacklistAttempts: 8,
 		LoginBlacklistWindow:   24 * time.Hour,
-		LoginEmailMaxAttempts:  10,
 	}}
 
 	sealer, err := security.NewTokenSealer(security.Options{
@@ -524,31 +526,35 @@ func newTestEnv(t *testing.T, opts ...envOption) *testEnv {
 		t.Fatal(err)
 	}
 
-	hash, _ := hasher.Hash(testPassword)
+	hash, _ := hasher.Hash(context.Background(), testPassword)
 
 	clock := &testClock{now: time.Date(2026, 9, 26, 10, 0, 0, 0, time.UTC)}
 	repo := newFakeRepository(clock.Now)
 	user := &fakeUser{id: 1, uuid: uuid.New(), email: "jane@example.com", passwordHash: hash, active: true}
 	repo.addUser(user)
 
-	p := Params{
-		Config: cfg,
-		Repo:   repo,
-		Users:  repo,
-		Sealer: sealer,
-		Hasher: hasher,
-		Logger: zap.NewNop(),
+	lc := fxtest.NewLifecycle(t)
+	p := AuthServiceParams{
+		Lifecycle: lc,
+		Config:    cfg,
+		Repo:      repo,
+		Users:     repo,
+		Sealer:    sealer,
+		Hasher:    hasher,
+		Logger:    zap.NewNop(),
 	}
 	for _, opt := range opts {
 		opt(cfg, &p)
 	}
 
-	sessionCache := infrastructure.NewSessionCache(cache.Options{Driver: cache.DriverMemory}, cfg, zap.NewNop())
+	s := cache.NewStore(cache.Options{Driver: cache.DriverMemory})
+	sessionCache := infrastructure.NewSessionCache(s, cfg, zap.NewNop())
 	p.Cache = sessionCache
 	p.Guard = infrastructure.NewLoginGuard(infrastructure.LoginGuardParams{
-		CacheOptions: cache.Options{Driver: cache.DriverMemory},
-		Config:       cfg,
-		Logger:       zap.NewNop(),
+		Lifecycle: lc,
+		Cache:     s,
+		Config:    cfg,
+		Logger:    zap.NewNop(),
 	})
 
 	svc := NewAuthService(p)
@@ -595,7 +601,7 @@ var browser = domain.Metadata{IPAddress: "203.0.113.10", UserAgent: "Firefox"}
 // Login
 // =============================================================================
 
-func TestLogin_IssuesSealedTokensAndStoresOnlyHashes(t *testing.T) {
+func TestAuthService_Login_IssuesSealedTokensAndStoresOnlyHashes(t *testing.T) {
 	e := newTestEnv(t)
 	pair := e.login(t, browser)
 
@@ -621,7 +627,7 @@ func TestLogin_IssuesSealedTokensAndStoresOnlyHashes(t *testing.T) {
 	}
 }
 
-func TestLogin_InvalidCredentialsLookTheSame(t *testing.T) {
+func TestAuthService_Login_InvalidCredentialsLookTheSame(t *testing.T) {
 	e := newTestEnv(t)
 
 	_, errWrongPassword := e.svc.Login(context.Background(), domain.LoginInput{Email: e.user.email, Password: "nope", Metadata: browser})
@@ -631,7 +637,7 @@ func TestLogin_InvalidCredentialsLookTheSame(t *testing.T) {
 	wantErr(t, errUnknownEmail, domain.ErrInvalidCredentials)
 }
 
-func TestLogin_InactiveUserOnlyAfterCorrectPassword(t *testing.T) {
+func TestAuthService_Login_InactiveUserOnlyAfterCorrectPassword(t *testing.T) {
 	e := newTestEnv(t)
 	e.user.active = false
 
@@ -642,10 +648,11 @@ func TestLogin_InactiveUserOnlyAfterCorrectPassword(t *testing.T) {
 	wantErr(t, err, domain.ErrUserInactive)
 }
 
-func TestLogin_SameDeviceDifferentIPRotatesSession(t *testing.T) {
+func TestAuthService_Login_SameDeviceDifferentIPRotatesSession(t *testing.T) {
 	e := newTestEnv(t)
 	first := e.login(t, domain.Metadata{IPAddress: "203.0.113.10", UserAgent: "App", DeviceID: "phone-1"})
-	firstID := mustAuthenticate(t, e, first.AccessToken) // cached
+	// Cached, so a later change must invalidate it.
+	firstID := mustAuthenticate(t, e, first.AccessToken)
 
 	second := e.login(t, domain.Metadata{IPAddress: "198.51.100.7", UserAgent: "App", DeviceID: "phone-1"})
 	secondID := mustAuthenticate(t, e, second.AccessToken)
@@ -659,7 +666,7 @@ func TestLogin_SameDeviceDifferentIPRotatesSession(t *testing.T) {
 	}
 }
 
-func TestLogin_WithoutDeviceMatchesByIPAndUserAgent(t *testing.T) {
+func TestAuthService_Login_WithoutDeviceMatchesByIPAndUserAgent(t *testing.T) {
 	e := newTestEnv(t)
 	first := e.login(t, browser)
 	firstID := mustAuthenticate(t, e, first.AccessToken)
@@ -685,7 +692,7 @@ func TestLogin_WithoutDeviceMatchesByIPAndUserAgent(t *testing.T) {
 	})
 }
 
-func TestLogin_WithoutDeviceMatchesIPv6BySlash64(t *testing.T) {
+func TestAuthService_Login_WithoutDeviceMatchesIPv6BySlash64(t *testing.T) {
 	e := newTestEnv(t)
 	meta := func(ip string) domain.Metadata { return domain.Metadata{IPAddress: ip, UserAgent: "Firefox"} }
 	first := mustAuthenticate(t, e, e.login(t, meta("2001:db8:1:2::1")).AccessToken)
@@ -699,7 +706,7 @@ func TestLogin_WithoutDeviceMatchesIPv6BySlash64(t *testing.T) {
 	}
 }
 
-func TestLogin_DifferentDeviceCreatesNewSession(t *testing.T) {
+func TestAuthService_Login_DifferentDeviceCreatesNewSession(t *testing.T) {
 	e := newTestEnv(t)
 	a := mustAuthenticate(t, e, e.login(t, domain.Metadata{IPAddress: "203.0.113.10", DeviceID: "phone-1"}).AccessToken)
 	b := mustAuthenticate(t, e, e.login(t, domain.Metadata{IPAddress: "203.0.113.10", DeviceID: "laptop-1"}).AccessToken)
@@ -712,7 +719,7 @@ func TestLogin_DifferentDeviceCreatesNewSession(t *testing.T) {
 // Brute-force protection
 // =============================================================================
 
-func TestLogin_BruteForceWarnsThenBlocks(t *testing.T) {
+func TestAuthService_Login_BruteForceWarnsThenBlocks(t *testing.T) {
 	e := newTestEnv(t)
 	bad := domain.LoginInput{Email: e.user.email, Password: "wrong", Metadata: browser}
 
@@ -723,7 +730,8 @@ func TestLogin_BruteForceWarnsThenBlocks(t *testing.T) {
 	}
 
 	wantErr(t, errs[0], domain.ErrInvalidCredentials)
-	wantErr(t, errs[2], domain.ErrInvalidCredentialsWarning) // 2 attempts left
+	// 2 attempts left.
+	wantErr(t, errs[2], domain.ErrInvalidCredentialsWarning)
 	wantErr(t, errs[4], domain.ErrInvalidCredentialsWarning)
 
 	// Blocked now, even with the right password.
@@ -731,7 +739,7 @@ func TestLogin_BruteForceWarnsThenBlocks(t *testing.T) {
 	wantErr(t, err, domain.ErrTooManyAttempts)
 }
 
-func TestLogin_ConcurrentAttemptsCannotExceedLimit(t *testing.T) {
+func TestAuthService_Login_ConcurrentAttemptsCannotExceedLimit(t *testing.T) {
 	e := newTestEnv(t)
 	bad := domain.LoginInput{Email: e.user.email, Password: "wrong", Metadata: browser}
 
@@ -758,7 +766,7 @@ func TestLogin_ConcurrentAttemptsCannotExceedLimit(t *testing.T) {
 	}
 }
 
-func TestLogin_SuccessClearsShortWindow(t *testing.T) {
+func TestAuthService_Login_SuccessClearsShortWindow(t *testing.T) {
 	e := newTestEnv(t)
 	bad := domain.LoginInput{Email: e.user.email, Password: "wrong", Metadata: browser}
 	for range 4 {
@@ -768,18 +776,18 @@ func TestLogin_SuccessClearsShortWindow(t *testing.T) {
 	e.login(t, browser)
 
 	_, err := e.svc.Login(context.Background(), bad)
-	wantErr(t, err, domain.ErrInvalidCredentials) // counter restarted: no warning yet
+	// The counter restarted: no warning yet.
+	wantErr(t, err, domain.ErrInvalidCredentials)
 }
 
-func TestLogin_PerEmailLimitAcrossIPs(t *testing.T) {
+func TestAuthService_Login_FailuresElsewhereCannotLockTheOwnerOut(t *testing.T) {
 	e := newTestEnv(t)
-	for i := range 10 {
-		ip := "198.51.100." + string(rune('0'+i))
+	for i := range 20 {
+		ip := "198.51.100." + strconv.Itoa(i)
 		_, _ = e.svc.Login(context.Background(), domain.LoginInput{Email: e.user.email, Password: "wrong", Metadata: domain.Metadata{IPAddress: ip}})
 	}
 
-	_, err := e.svc.Login(context.Background(), domain.LoginInput{Email: e.user.email, Password: testPassword, Metadata: domain.Metadata{IPAddress: "192.0.2.99"}})
-	wantErr(t, err, domain.ErrTooManyAttempts)
+	e.login(t, domain.Metadata{IPAddress: "192.0.2.99"})
 }
 
 // =============================================================================
@@ -790,8 +798,8 @@ type fakeVerifier struct{ err error }
 
 func (f fakeVerifier) Verify(context.Context, string, string) error { return f.err }
 
-func TestLogin_RecaptchaIsOptional(t *testing.T) {
-	enable := func(cfg *config.Config, _ *Params) { cfg.Auth.RecaptchaOnLogin = true }
+func TestAuthService_Login_RecaptchaIsOptional(t *testing.T) {
+	enable := func(cfg *config.Config, _ *AuthServiceParams) { cfg.Auth.RecaptchaOnLogin = true }
 
 	t.Run("enabled but no verifier wired: login works", func(t *testing.T) {
 		e := newTestEnv(t, enable)
@@ -799,13 +807,13 @@ func TestLogin_RecaptchaIsOptional(t *testing.T) {
 	})
 
 	t.Run("enabled with a failing verifier: rejected", func(t *testing.T) {
-		e := newTestEnv(t, enable, func(_ *config.Config, p *Params) { p.Recaptcha = fakeVerifier{err: errors.New("bad")} })
+		e := newTestEnv(t, enable, func(_ *config.Config, p *AuthServiceParams) { p.Recaptcha = fakeVerifier{err: errors.New("bad")} })
 		_, err := e.svc.Login(context.Background(), domain.LoginInput{Email: e.user.email, Password: testPassword, Metadata: browser})
 		wantErr(t, err, domain.ErrRecaptchaFailed)
 	})
 
 	t.Run("disabled: verifier not called", func(t *testing.T) {
-		e := newTestEnv(t, func(_ *config.Config, p *Params) { p.Recaptcha = fakeVerifier{err: errors.New("bad")} })
+		e := newTestEnv(t, func(_ *config.Config, p *AuthServiceParams) { p.Recaptcha = fakeVerifier{err: errors.New("bad")} })
 		e.login(t, browser)
 	})
 }
@@ -814,7 +822,7 @@ func TestLogin_RecaptchaIsOptional(t *testing.T) {
 // AuthenticateAccess
 // =============================================================================
 
-func TestAuthenticate_RejectsRefreshTokenRawTokenAndHash(t *testing.T) {
+func TestAuthService_Authenticate_RejectsRefreshTokenRawTokenAndHash(t *testing.T) {
 	e := newTestEnv(t)
 	pair := e.login(t, browser)
 	raw, _ := e.sealer.Open(pair.AccessToken)
@@ -829,25 +837,31 @@ func TestAuthenticate_RejectsRefreshTokenRawTokenAndHash(t *testing.T) {
 	wantErr(t, err, domain.ErrInvalidToken)
 }
 
-func TestAuthenticate_ExpiredAccessToken(t *testing.T) {
+func TestAuthService_Authenticate_ExpiredAccessToken(t *testing.T) {
 	e := newTestEnv(t)
 	pair := e.login(t, browser)
 	mustAuthenticate(t, e, pair.AccessToken)
 
-	e.clock.Advance(16 * time.Minute) // expiry is checked even on cache hits
+	// Expiry is checked even on cache hits.
+	e.clock.Advance(16 * time.Minute)
 	_, err := e.authenticate(t, pair.AccessToken)
 	wantErr(t, err, domain.ErrTokenExpired)
 }
 
-func TestAuthenticate_DeactivatedUserRejectedDespiteCache(t *testing.T) {
+func TestAuthService_Authenticate_DeactivatedUserRejectedDespiteCache(t *testing.T) {
 	e := newTestEnv(t)
 	pair := e.login(t, browser)
-	mustAuthenticate(t, e, pair.AccessToken) // cached
+	// Cached, so a later change must invalidate it.
+	mustAuthenticate(t, e, pair.AccessToken)
 
+	// What UserService does on deactivation: revoke in its transaction, then drop the cache.
 	e.user.active = false
-	if err := adapter.NewSessionRevokerAdapter(e.repo, e.cache).RevokeUserSessions(context.Background(), e.user.uuid); err != nil {
+	revoker := useradapter.NewSessionRevokerAdapter(e.repo, e.cache)
+	if err := revoker.RevokeUserSessions(context.Background(), e.user.uuid); err != nil {
 		t.Fatal(err)
 	}
+
+	revoker.InvalidateUserSessions(context.Background(), e.user.uuid)
 
 	_, err := e.authenticate(t, pair.AccessToken)
 	wantErr(t, err, domain.ErrUserInactive)
@@ -856,7 +870,7 @@ func TestAuthenticate_DeactivatedUserRejectedDespiteCache(t *testing.T) {
 	wantErr(t, err, domain.ErrUserInactive)
 }
 
-func TestAuthenticate_InactiveUserWithoutRevocation(t *testing.T) {
+func TestAuthService_Authenticate_InactiveUserWithoutRevocation(t *testing.T) {
 	e := newTestEnv(t)
 	pair := e.login(t, browser)
 
@@ -874,10 +888,11 @@ func TestAuthenticate_InactiveUserWithoutRevocation(t *testing.T) {
 // Logout
 // =============================================================================
 
-func TestLogout_RevokesFamilyDespiteCache(t *testing.T) {
+func TestAuthService_Logout_RevokesFamilyDespiteCache(t *testing.T) {
 	e := newTestEnv(t)
 	pair := e.login(t, browser)
-	id := mustAuthenticate(t, e, pair.AccessToken) // cached
+	// Cached, so a later change must invalidate it.
+	id := mustAuthenticate(t, e, pair.AccessToken)
 
 	if err := e.svc.Logout(context.Background(), id); err != nil {
 		t.Fatal(err)
@@ -889,7 +904,7 @@ func TestLogout_RevokesFamilyDespiteCache(t *testing.T) {
 	wantErr(t, err, domain.ErrTokenRevoked)
 }
 
-func TestLogoutAll_RevokesEverySession(t *testing.T) {
+func TestAuthService_LogoutAll_RevokesEverySession(t *testing.T) {
 	e := newTestEnv(t)
 	phone := e.login(t, domain.Metadata{DeviceID: "phone"})
 	laptop := e.login(t, domain.Metadata{DeviceID: "laptop"})
@@ -910,10 +925,11 @@ func TestLogoutAll_RevokesEverySession(t *testing.T) {
 // Refresh
 // =============================================================================
 
-func TestRefresh_RotatesPairInSameSession(t *testing.T) {
+func TestAuthService_Refresh_RotatesPairInSameSession(t *testing.T) {
 	e := newTestEnv(t)
 	old := e.login(t, browser)
-	oldID := mustAuthenticate(t, e, old.AccessToken) // cached
+	// Cached, so a later change must invalidate it.
+	oldID := mustAuthenticate(t, e, old.AccessToken)
 
 	fresh, err := e.svc.Refresh(context.Background(), old.RefreshToken, browser)
 	if err != nil {
@@ -929,7 +945,7 @@ func TestRefresh_RotatesPairInSameSession(t *testing.T) {
 	wantErr(t, err, domain.ErrTokenRevoked)
 }
 
-func TestRefresh_ReuseRevokesWholeSession(t *testing.T) {
+func TestAuthService_Refresh_ReuseRevokesWholeSession(t *testing.T) {
 	e := newTestEnv(t)
 	old := e.login(t, browser)
 	fresh, err := e.svc.Refresh(context.Background(), old.RefreshToken, browser)
@@ -937,8 +953,10 @@ func TestRefresh_ReuseRevokesWholeSession(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mustAuthenticate(t, e, fresh.AccessToken) // cached
+	// Cached, so the revocation below must invalidate it.
+	mustAuthenticate(t, e, fresh.AccessToken)
 
+	e.clock.Advance(reuseGrace + time.Second)
 	_, err = e.svc.Refresh(context.Background(), old.RefreshToken, browser)
 	wantErr(t, err, domain.ErrTokenReused)
 
@@ -948,7 +966,34 @@ func TestRefresh_ReuseRevokesWholeSession(t *testing.T) {
 	wantErr(t, err, domain.ErrTokenRevoked)
 }
 
-func TestRefresh_RejectsAccessTokenExpiredAndGarbage(t *testing.T) {
+func TestAuthService_Refresh_RetryWithinGraceOnlyFails(t *testing.T) {
+	e := newTestEnv(t)
+	old := e.login(t, browser)
+	fresh, err := e.svc.Refresh(context.Background(), old.RefreshToken, browser)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A second tab refreshing with the same token at once must not log the user out.
+	_, err = e.svc.Refresh(context.Background(), old.RefreshToken, browser)
+	wantErr(t, err, domain.ErrTokenRevoked)
+	mustAuthenticate(t, e, fresh.AccessToken)
+}
+
+func TestAuthService_Refresh_ReuseAfterReloginRevokesSession(t *testing.T) {
+	e := newTestEnv(t)
+	old := e.login(t, browser)
+	again := e.login(t, browser)
+
+	e.clock.Advance(reuseGrace + time.Second)
+	_, err := e.svc.Refresh(context.Background(), old.RefreshToken, browser)
+	wantErr(t, err, domain.ErrTokenReused)
+
+	_, err = e.authenticate(t, again.AccessToken)
+	wantErr(t, err, domain.ErrTokenRevoked)
+}
+
+func TestAuthService_Refresh_RejectsAccessTokenExpiredAndGarbage(t *testing.T) {
 	e := newTestEnv(t)
 	pair := e.login(t, browser)
 
@@ -963,7 +1008,7 @@ func TestRefresh_RejectsAccessTokenExpiredAndGarbage(t *testing.T) {
 	wantErr(t, err, domain.ErrTokenExpired)
 }
 
-func TestRefresh_KeepsDeviceWhenHeaderMissing(t *testing.T) {
+func TestAuthService_Refresh_KeepsDeviceWhenHeaderMissing(t *testing.T) {
 	e := newTestEnv(t)
 	pair := e.login(t, domain.Metadata{DeviceID: "phone-1"})
 
@@ -982,7 +1027,7 @@ func TestRefresh_KeepsDeviceWhenHeaderMissing(t *testing.T) {
 // Sessions, internal endpoints, cleanup
 // =============================================================================
 
-func TestListSessions_FlagsCurrent(t *testing.T) {
+func TestAuthService_ListSessions_FlagsCurrent(t *testing.T) {
 	e := newTestEnv(t)
 	phone := e.login(t, domain.Metadata{DeviceID: "phone"})
 	e.login(t, domain.Metadata{DeviceID: "laptop"})
@@ -1012,7 +1057,7 @@ func TestListSessions_FlagsCurrent(t *testing.T) {
 	}
 }
 
-func TestGetTokenDetails(t *testing.T) {
+func TestAuthService_GetTokenDetails(t *testing.T) {
 	e := newTestEnv(t)
 	pair := e.login(t, browser)
 
@@ -1029,7 +1074,7 @@ func TestGetTokenDetails(t *testing.T) {
 	wantErr(t, err, domain.ErrInvalidToken)
 }
 
-func TestRevokeToken(t *testing.T) {
+func TestAuthService_RevokeToken(t *testing.T) {
 	e := newTestEnv(t)
 	pair := e.login(t, browser)
 	mustAuthenticate(t, e, pair.AccessToken)
@@ -1042,7 +1087,7 @@ func TestRevokeToken(t *testing.T) {
 	wantErr(t, err, domain.ErrTokenRevoked)
 }
 
-func TestRevokeAllTokens_RevokesEveryDevice(t *testing.T) {
+func TestAuthService_RevokeAllTokens_RevokesEveryDevice(t *testing.T) {
 	e := newTestEnv(t)
 	phone := e.login(t, domain.Metadata{DeviceID: "phone"})
 	laptop := e.login(t, domain.Metadata{DeviceID: "laptop"})
@@ -1059,7 +1104,7 @@ func TestRevokeAllTokens_RevokesEveryDevice(t *testing.T) {
 	}
 }
 
-func TestCleanupTokens(t *testing.T) {
+func TestAuthService_CleanupTokens(t *testing.T) {
 	e := newTestEnv(t)
 	pair := e.login(t, browser)
 	id := mustAuthenticate(t, e, pair.AccessToken)
@@ -1082,7 +1127,7 @@ func TestCleanupTokens(t *testing.T) {
 	mustAuthenticate(t, e, fresh.AccessToken)
 }
 
-func TestCleanupTokens_KeepsLiveSessionStartAndLatestAccess(t *testing.T) {
+func TestAuthService_CleanupTokens_KeepsLiveSessionStartAndLatestAccess(t *testing.T) {
 	e := newTestEnv(t)
 	started := e.clock.Now()
 	pair := e.login(t, browser)
@@ -1110,4 +1155,21 @@ func TestCleanupTokens_KeepsLiveSessionStartAndLatestAccess(t *testing.T) {
 	if !details.Session.CreatedAt.Equal(started) {
 		t.Errorf("session CreatedAt = %v, want %v (the login time)", details.Session.CreatedAt, started)
 	}
+}
+
+func TestAuthService_CleanupTokens_KeepsExchangedRefreshTokenUntilItExpires(t *testing.T) {
+	e := newTestEnv(t)
+	old := e.login(t, browser)
+	if _, err := e.svc.Refresh(context.Background(), old.RefreshToken, browser); err != nil {
+		t.Fatal(err)
+	}
+
+	// Revoked 2h ago, past a 1h retention, but valid for 22h more had it not been exchanged.
+	e.clock.Advance(2 * time.Hour)
+	if _, err := e.svc.CleanupTokens(context.Background(), time.Hour); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := e.svc.Refresh(context.Background(), old.RefreshToken, browser)
+	wantErr(t, err, domain.ErrTokenReused)
 }

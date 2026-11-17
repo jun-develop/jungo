@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"go/token"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -32,8 +33,8 @@ func runCommandScaffold(name, signature, featureName string) {
 		console.Fatalf("command name is required. Usage: make command NAME=<name> SIGNATURE=<cli:signature>")
 	}
 
-	if !featureNamePattern.MatchString(name) {
-		console.Fatalf("invalid command name %q: must be snake_case (lowercase letters, digits, underscores; must start with a letter)", name)
+	if !commandNamePattern.MatchString(name) || token.IsKeyword(name) {
+		console.Fatalf("invalid command name %q: must be snake_case (lowercase letters, digits, underscores; must start with a letter) and not a Go keyword", name)
 	}
 
 	if signature == "" {
@@ -55,6 +56,7 @@ func generateGlobalCommand(name, pascal, signature string) {
 	filePath := filepath.Join(globalCmdDir, name+"_command.go")
 	data := commandData{Pascal: pascal, Signature: signature, Package: "commands"}
 
+	requireMarker(globalCmdFile, commandMarker)
 	writeCommandFile(filePath, data)
 
 	block := commandRegistrationBlock(fmt.Sprintf("New%sCommand", pascal))
@@ -79,6 +81,7 @@ func generateFeatureCommand(featureName, name, pascal, signature string) {
 	filePath := filepath.Join(featureDir, "command", name+"_command.go")
 	data := commandData{Pascal: pascal, Signature: signature, Package: "command"}
 
+	requireMarker(moduleFile, commandMarker)
 	writeCommandFile(filePath, data)
 
 	commandImport := fmt.Sprintf("%s/internal/features/%s/command", moduleName, featureName)
@@ -99,6 +102,18 @@ func generateFeatureCommand(featureName, name, pascal, signature string) {
 
 	console.Successf("Command %q generated in %s", signature, filePath)
 	console.Infof("Run it with: make console CMD=%q", signature)
+}
+
+// requireMarker stops before anything is written when path lacks marker, so a failed registration never leaves a half-generated command behind.
+func requireMarker(path, marker string) {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		console.Fatalf("read %s: %v", path, err)
+	}
+
+	if !strings.Contains(string(content), marker) {
+		console.Fatalf("%s has no %q marker to register the command after; add it inside the module's options", path, marker)
+	}
 }
 
 // writeCommandFile renders the command template to path without overwriting existing files.
@@ -243,7 +258,6 @@ func (c *{{.Pascal}}Command) Signature() string {
 
 // Run implements console.Command.
 func (c *{{.Pascal}}Command) Run(ctx context.Context, args []string) error {
-	// TODO: implement {{.Signature}}.
 	console.Infof("TODO: implement {{.Signature}}")
 	return nil
 }

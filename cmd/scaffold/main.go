@@ -4,13 +4,14 @@
 //
 //	make feature NAME=product
 //	make feature-remove NAME=product
-//	make command NAME=health-check SIGNATURE=health:check
-//	make command NAME=list-users SIGNATURE=user:list FEATURE=user
+//	make command NAME=sync_orders SIGNATURE=order:sync
+//	make command NAME=send_digest SIGNATURE=user:send-digest FEATURE=user
 package main
 
 import (
 	"flag"
 	"fmt"
+	"go/token"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -29,15 +30,19 @@ const (
 	sqlcDir       = "internal/database/primary/sqlc"
 )
 
-// featureNamePattern also keeps the permission codes ("<plural>:read") within chk_permissions_code_format.
+// featureNamePattern keeps a feature name a valid package name whose permission codes
+// ("<plural>:read") pass chk_permissions_code_format, which allows no digits.
 var featureNamePattern = regexp.MustCompile(`^[a-z][a-z_]*$`)
+
+// commandNamePattern keeps a command name a valid file and identifier part.
+var commandNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
 
 func main() {
 	kind := flag.String("type", "feature", "\"feature\" or \"command\"")
 	name := flag.String("name", "", "Name in snake_case (required)")
 	mode := flag.String("mode", "create", "\"create\" or \"remove\" (feature only)")
 	table := flag.String("table", "", "Override the generated table name (feature only, default: \"<name>s\")")
-	signature := flag.String("signature", "", "CLI signature, e.g. \"user:list\" (command only, required)")
+	signature := flag.String("signature", "", "CLI signature, e.g. \"order:sync\" (command only, required)")
 	feature := flag.String("feature", "", "Attach the command to this existing feature instead of internal/console/commands (command only)")
 	flag.Parse()
 
@@ -57,8 +62,8 @@ func runFeatureScaffold(name, mode, table string) {
 		console.Fatalf("feature name is required. Usage: make feature NAME=<feature_name>")
 	}
 
-	if !featureNamePattern.MatchString(name) {
-		console.Fatalf("invalid feature name %q: must be snake_case (lowercase letters and underscores; must start with a letter)", name)
+	if !featureNamePattern.MatchString(name) || token.IsKeyword(name) {
+		console.Fatalf("invalid feature name %q: must be snake_case (lowercase letters and underscores, starting with a letter) and not a Go keyword", name)
 	}
 
 	data := scaffold.NewFeatureData(name, moduleName, table)
@@ -86,7 +91,7 @@ func runCreate(data scaffold.FeatureData, importPath, moduleLine string) {
 
 	console.Infof("Generating feature %q (table %q, migration %s)...", data.Name, data.Table, seq)
 
-	cfg := scaffold.GenerateConfig{
+	cfg := scaffold.GenerateOptions{
 		Data:       data,
 		Files:      featureFiles(data, seq),
 		FxFile:     fxFile,
@@ -100,14 +105,14 @@ func runCreate(data scaffold.FeatureData, importPath, moduleLine string) {
 	}
 
 	console.Successf("Feature %q generated in %s", data.Name, featureDir)
-	console.Infof("Next: make migrate-up   (creates the %s table and its %s:* permissions, granted to super_admin)", data.Table, data.Plural)
-	console.Infof("Then: make sqlc         (generates internal/database/primary/sqlc/%s.sql.go)", data.Name)
-	console.Infof("Then: go build ./...    (verify everything compiles)")
+	console.Infof("Next: make sqlc         (generates internal/database/primary/sqlc/%s.sql.go; the feature does not build before)", data.Name)
+	console.Infof("Then: make migrate-up   (creates the %s table and its %s:* permissions, granted to super_admin)", data.Table, data.Plural)
+	console.Infof("Then: go build ./... && go test ./internal/features/%s/...", data.Name)
 }
 
 // runRemove deletes a feature's files and unregisters its module from fx.go.
 func runRemove(data scaffold.FeatureData, importPath, moduleLine string) {
-	cfg := scaffold.RemoveConfig{
+	cfg := scaffold.RemoveOptions{
 		Dirs: []string{filepath.Join(featuresDir, data.Name)},
 		ExtraFiles: []string{
 			filepath.Join(sqlcDir, data.Name+".sql.go"),

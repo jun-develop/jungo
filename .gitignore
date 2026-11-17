@@ -11,7 +11,7 @@ storage/uploads/*
 storage/logs/**/*
 storage/bootstrap/email_blocklist.conf
 !storage/uploads/.gitkeep
-scaffold
+/scaffold
 *.test
 *.out
 skills-lock.json

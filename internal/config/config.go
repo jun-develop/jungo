@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -24,6 +25,9 @@ type DatabaseConfig struct {
 	HealthCheckPeriod  time.Duration `env:"DB_HEALTH_CHECK_PERIOD" envDefault:"1m"`
 	SlowQueryThreshold time.Duration `env:"DB_SLOW_QUERY_THRESHOLD" envDefault:"200ms"`
 	QueryLogging       bool          `env:"DB_QUERY_LOGGING" envDefault:"false"`
+	StatementTimeout   time.Duration `env:"DB_STATEMENT_TIMEOUT" envDefault:"30s"`
+	IdleInTxTimeout    time.Duration `env:"DB_IDLE_IN_TX_TIMEOUT" envDefault:"60s"`
+	ConnectTimeout     time.Duration `env:"DB_CONNECT_TIMEOUT" envDefault:"5s"`
 }
 
 // CORSConfig configures cross-origin request handling.
@@ -42,12 +46,9 @@ type LoggerConfig struct {
 	MaxAge     int  `env:"LOG_MAX_AGE" envDefault:"7"`
 	Compress   bool `env:"LOG_COMPRESS" envDefault:"true"`
 
-	AppLevel string `env:"LOG_APP_LEVEL" envDefault:"info"`
-
-	HTTPLevel string `env:"LOG_HTTP_LEVEL" envDefault:"info"`
-
-	SQLLevel string `env:"LOG_SQL_LEVEL" envDefault:"info"`
-
+	AppLevel     string `env:"LOG_APP_LEVEL" envDefault:"info"`
+	HTTPLevel    string `env:"LOG_HTTP_LEVEL" envDefault:"info"`
+	SQLLevel     string `env:"LOG_SQL_LEVEL" envDefault:"info"`
 	LimiterLevel string `env:"LOG_LIMITER_LEVEL" envDefault:"info"`
 
 	Output string
@@ -76,11 +77,13 @@ type BannerConfig struct {
 type SecurityConfig struct {
 	MaxRequestBodySize int64    `env:"SECURITY_MAX_BODY_SIZE" envDefault:"2097152"`
 	TrustedProxies     []string `env:"SECURITY_TRUSTED_PROXIES"`
+	// ForceHSTS sends Strict-Transport-Security even over plain HTTP, for a TLS-terminating proxy.
+	ForceHSTS bool `env:"SECURITY_FORCE_HSTS" envDefault:"false"`
 }
 
 // RedisConfig configures the Redis cache connection.
 type RedisConfig struct {
-	Enabled  bool   `env:"CACHE_REDIS_ENABLE" envDefault:"false"`
+	Enabled  bool   `env:"CACHE_REDIS_ENABLED" envDefault:"false"`
 	Host     string `env:"REDIS_HOST" envDefault:"localhost"`
 	Port     string `env:"REDIS_PORT" envDefault:"6379"`
 	Password string `env:"REDIS_PASSWORD"`
@@ -107,7 +110,9 @@ type MailConfig struct {
 	SMTPPort     int    `env:"MAIL_SMTP_PORT" envDefault:"587"`
 	SMTPUsername string `env:"MAIL_SMTP_USERNAME"`
 	SMTPPassword string `env:"MAIL_SMTP_PASSWORD"`
-	BrevoAPIKey  string `env:"MAIL_BREVO_API_KEY"`
+	// SMTPAllowPlaintext sends without TLS; only for a local server such as Mailpit.
+	SMTPAllowPlaintext bool   `env:"MAIL_SMTP_ALLOW_PLAINTEXT" envDefault:"false"`
+	BrevoAPIKey        string `env:"MAIL_BREVO_API_KEY"`
 }
 
 // RecaptchaConfig configures Google reCAPTCHA verification.
@@ -139,7 +144,6 @@ type AuthConfig struct {
 	LoginBlockWindow       time.Duration `env:"AUTH_LOGIN_BLOCK_WINDOW" envDefault:"15m"`
 	LoginBlacklistAttempts int64         `env:"AUTH_LOGIN_BLACKLIST_ATTEMPTS" envDefault:"8"`
 	LoginBlacklistWindow   time.Duration `env:"AUTH_LOGIN_BLACKLIST_WINDOW" envDefault:"24h"`
-	LoginEmailMaxAttempts  int64         `env:"AUTH_LOGIN_EMAIL_MAX_ATTEMPTS" envDefault:"10"`
 
 	PasswordResetURL      string        `env:"AUTH_PASSWORD_RESET_URL"`
 	PasswordResetTTL      time.Duration `env:"AUTH_PASSWORD_RESET_TTL" envDefault:"30m"`
@@ -190,7 +194,6 @@ func (c *Config) IsDevelopment() bool {
 var (
 	mu       sync.Mutex
 	instance *Config
-	loaded   bool
 )
 
 // NewConfig loads configuration from environment variables as a singleton.
@@ -198,7 +201,7 @@ func NewConfig() *Config {
 	mu.Lock()
 	defer mu.Unlock()
 
-	if loaded {
+	if instance != nil {
 		return instance
 	}
 
@@ -212,13 +215,31 @@ func NewConfig() *Config {
 	}
 
 	instance = cfg
-	loaded = true
 
 	return instance
 }
 
-// DSN returns the PostgreSQL connection string for d in the given timezone.
+// DSN returns the PostgreSQL connection string for d in the given timezone. Values are quoted, so a password with spaces, quotes or backslashes still works.
 func (d DatabaseConfig) DSN(timezone string) string {
-	return fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=%s timezone=%s",
-		d.Host, d.Port, d.User, d.Password, d.Name, d.SSLMode, timezone)
+	pairs := [][2]string{
+		{"host", d.Host},
+		{"port", d.Port},
+		{"user", d.User},
+		{"password", d.Password},
+		{"dbname", d.Name},
+		{"sslmode", d.SSLMode},
+		{"timezone", timezone},
+		{"connect_timeout", fmt.Sprint(int(d.ConnectTimeout.Seconds()))},
+		{"statement_timeout", fmt.Sprint(d.StatementTimeout.Milliseconds())},
+		{"idle_in_transaction_session_timeout", fmt.Sprint(d.IdleInTxTimeout.Milliseconds())},
+	}
+
+	// libpq quoting: wrap in single quotes, escape \ and '.
+	escape := strings.NewReplacer(`\`, `\\`, `'`, `\'`)
+	parts := make([]string, len(pairs))
+	for i, p := range pairs {
+		parts[i] = p[0] + "='" + escape.Replace(p[1]) + "'"
+	}
+
+	return strings.Join(parts, " ")
 }

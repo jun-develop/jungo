@@ -78,14 +78,14 @@ func (h *AccessHandler) GetRole(ctx *gin.Context) {
 	h.responder.SendWithData(ctx, http.StatusOK, "role_retrieved", v1dto.NewRoleResponse(role))
 }
 
-// UpdateRole handles PATCH /roles/:uuid.
-func (h *AccessHandler) UpdateRole(ctx *gin.Context) {
+// RenameRole handles PATCH /roles/:uuid.
+func (h *AccessHandler) RenameRole(ctx *gin.Context) {
 	uid, ok := validation.ParseUUID(ctx, h.responder, h.validator)
 	if !ok {
 		return
 	}
 
-	var req v1dto.UpdateRoleRequest
+	var req v1dto.RenameRoleRequest
 	if !validation.BindJSON(ctx, h.responder, h.validator, &req) {
 		return
 	}
@@ -99,14 +99,14 @@ func (h *AccessHandler) UpdateRole(ctx *gin.Context) {
 	h.responder.SendWithData(ctx, http.StatusOK, "role_updated", v1dto.NewRoleResponse(role))
 }
 
-// SetRolePermissions handles PUT /roles/:uuid/permissions.
-func (h *AccessHandler) SetRolePermissions(ctx *gin.Context) {
+// ReplaceRolePermissions handles PUT /roles/:uuid/permissions.
+func (h *AccessHandler) ReplaceRolePermissions(ctx *gin.Context) {
 	uid, ok := validation.ParseUUID(ctx, h.responder, h.validator)
 	if !ok {
 		return
 	}
 
-	var req v1dto.SetRolePermissionsRequest
+	var req v1dto.ReplaceRolePermissionsRequest
 	if !validation.BindJSON(ctx, h.responder, h.validator, &req) {
 		return
 	}

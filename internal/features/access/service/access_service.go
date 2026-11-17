@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
-	"go.uber.org/zap"
+	"go.uber.org/fx"
 
 	"github.com/jun-develop/junkit/slicex"
 
@@ -16,26 +16,35 @@ import (
 	"jungo/internal/features/access/domain"
 )
 
-// maxUsersToInvalidate caps per-user cache invalidation; a role with more users invalidates all.
-const maxUsersToInvalidate = 1000
+// maxUsersToInvalidate caps per-user cache invalidation (one cache call per user); a role with more
+// users invalidates everyone's cached permissions at once.
+const maxUsersToInvalidate = 100
 
 // roleCodePattern matches roles.code (chk_roles_code_format).
 var roleCodePattern = regexp.MustCompile(`^[a-z_]+$`)
 
+// AccessServiceParams defines dependencies for AccessService.
+type AccessServiceParams struct {
+	fx.In
+
+	Repo  domain.AccessRepository
+	Users domain.UserLookup
+	Cache domain.PermissionCache
+
+	Permissions []string `group:"permissions"`
+}
+
 // AccessService implements domain.AccessService and middleware.PermissionLoader.
 type AccessService struct {
-	repo   domain.AccessRepository
-	users  domain.UserLookup
-	cache  domain.PermissionCache
-	logger *zap.Logger
-
-	// permissions holds every code the features use (the "permissions" Fx group).
+	repo        domain.AccessRepository
+	users       domain.UserLookup
+	cache       domain.PermissionCache
 	permissions []string
 }
 
-// NewAccessService creates an AccessService; permissions are the codes every feature uses.
-func NewAccessService(repo domain.AccessRepository, users domain.UserLookup, cache domain.PermissionCache, logger *zap.Logger, permissions []string) *AccessService {
-	return &AccessService{repo: repo, users: users, cache: cache, logger: logger, permissions: permissions}
+// NewAccessService creates an AccessService.
+func NewAccessService(p AccessServiceParams) *AccessService {
+	return &AccessService{repo: p.Repo, users: p.Users, cache: p.Cache, permissions: p.Permissions}
 }
 
 // Permissions returns the permission codes granted to a user through their roles.
@@ -51,7 +60,7 @@ func (s *AccessService) IsPermission(code string) bool {
 }
 
 // CheckPermissions returns an error when a permission a feature uses is missing from the
-// permissions table (seeders/002_access.sql, or the feature's migration, has not run). It only reads.
+// permissions table (the migration that inserts it has not run). It only reads.
 func (s *AccessService) CheckPermissions(ctx context.Context) error {
 	known, err := s.knownPermissions(ctx)
 	if err != nil {
@@ -66,7 +75,7 @@ func (s *AccessService) CheckPermissions(ctx context.Context) error {
 	}
 
 	if len(missing) > 0 {
-		return fmt.Errorf("permissions used by the code are missing from the database (run seeders/002_access.sql, or make migrate-up for a feature's): %s", strings.Join(missing, ", "))
+		return fmt.Errorf("permissions used by the code are missing from the database (run the migrations: make migrate-up, or the console's db:migrate): %s", strings.Join(missing, ", "))
 	}
 
 	return nil
@@ -90,7 +99,8 @@ func (s *AccessService) CreateRole(ctx context.Context, input domain.CreateRoleI
 		return nil, domain.ErrInvalidRoleCode
 	}
 
-	if strings.TrimSpace(input.Name) == "" {
+	name := strings.TrimSpace(input.Name)
+	if name == "" {
 		return nil, domain.ErrInvalidRoleName
 	}
 
@@ -106,8 +116,12 @@ func (s *AccessService) CreateRole(ctx context.Context, input domain.CreateRoleI
 		}
 
 		var err error
-		if role, err = s.repo.CreateRole(ctx, input.Code, input.Name); err != nil || len(codes) == 0 {
+		if role, err = s.repo.CreateRole(ctx, input.Code, name); err != nil {
 			return err
+		}
+
+		if len(codes) == 0 {
+			return nil
 		}
 
 		return s.repo.ReplaceRolePermissions(ctx, role.ID, codes)
@@ -121,27 +135,19 @@ func (s *AccessService) CreateRole(ctx context.Context, input domain.CreateRoleI
 
 // GetRole returns a role with its permissions and user count.
 func (s *AccessService) GetRole(ctx context.Context, uid uuid.UUID) (*domain.Role, error) {
-	roles, err := s.repo.ListRoles(ctx, []uuid.UUID{uid})
-	if err != nil {
-		return nil, err
-	}
-
-	if len(roles) == 0 {
-		return nil, domain.ErrRoleNotFound
-	}
-
-	return roles[0], nil
+	return s.getRole(ctx, uid, true)
 }
 
 // ListRoles returns every role with its permissions and user count.
 func (s *AccessService) ListRoles(ctx context.Context) ([]*domain.Role, error) {
-	return s.repo.ListRoles(ctx, nil)
+	return s.repo.ListRoles(ctx, nil, true)
 }
 
 // RenameRole changes a non-system role's display name; its code never changes. The actor must hold
 // all its permissions, as for any other change to the role.
 func (s *AccessService) RenameRole(ctx context.Context, uid uuid.UUID, name string) (*domain.Role, error) {
-	if strings.TrimSpace(name) == "" {
+	name = strings.TrimSpace(name)
+	if name == "" {
 		return nil, domain.ErrInvalidRoleName
 	}
 
@@ -190,7 +196,7 @@ func (s *AccessService) ReplaceRolePermissions(ctx context.Context, uid uuid.UUI
 			return err
 		}
 
-		userIDs, err = s.repo.ListUserIDsByRole(ctx, role.ID)
+		userIDs, err = s.repo.ListUserIDsByRole(ctx, role.ID, maxUsersToInvalidate+1)
 
 		return err
 	})
@@ -218,7 +224,7 @@ func (s *AccessService) DeleteRole(ctx context.Context, uid uuid.UUID) error {
 			return err
 		}
 
-		if userIDs, err = s.repo.ListUserIDsByRole(ctx, role.ID); err != nil {
+		if userIDs, err = s.repo.ListUserIDsByRole(ctx, role.ID, maxUsersToInvalidate+1); err != nil {
 			return err
 		}
 
@@ -233,7 +239,7 @@ func (s *AccessService) DeleteRole(ctx context.Context, uid uuid.UUID) error {
 	return nil
 }
 
-// ListUserRoles returns the roles of the user uid.
+// ListUserRoles returns the roles of the user userUUID.
 func (s *AccessService) ListUserRoles(ctx context.Context, userUUID uuid.UUID) ([]*domain.Role, error) {
 	userID, err := s.users.GetUserID(ctx, userUUID)
 	if err != nil {
@@ -261,70 +267,18 @@ func (s *AccessService) SetUserRoles(ctx context.Context, userUUID uuid.UUID, ro
 			return err
 		}
 
-		current, err := s.repo.ListUserRoles(ctx, userID)
+		current, wanted, err := s.lockUserRoleChange(ctx, userID, roleUUIDs)
 		if err != nil {
 			return err
 		}
 
-		// Lock every role the change touches before reading their permissions.
-		touched := slices.Clone(roleUUIDs)
-		for _, r := range current {
-			touched = append(touched, r.UUID)
-		}
-
-		if err := s.repo.LockRoles(ctx, touched); err != nil {
-			return err
-		}
-
-		wanted, err := s.rolesByUUID(ctx, roleUUIDs)
+		changed, err := s.rolesByUUID(ctx, changedRoles(current, wanted))
 		if err != nil {
 			return err
 		}
 
-		var changed []uuid.UUID
-		for _, r := range wanted {
-			if r.IsSystem {
-				return domain.ErrSystemRole
-			}
-
-			if !containsRole(current, r.UUID) {
-				changed = append(changed, r.UUID)
-			}
-		}
-
-		for _, r := range current {
-			if !r.IsSystem && !containsRole(wanted, r.UUID) {
-				changed = append(changed, r.UUID)
-			}
-		}
-
-		changedRoles, err := s.rolesByUUID(ctx, changed)
-		if err != nil {
+		if err := s.checkAssign(ctx, userID, changed); err != nil {
 			return err
-		}
-
-		var codes []string
-		for _, r := range changedRoles {
-			codes = append(codes, r.Permissions...)
-		}
-
-		held, err := actor.Reload(ctx, s.repo, domain.RolesAssign)
-		if err != nil {
-			return err
-		}
-
-		// As in UpdateUser, no one manages a stronger user: the actor holds all the user holds.
-		target, err := s.repo.GetUserPermissions(ctx, userID)
-		if err != nil {
-			return err
-		}
-
-		if !actor.Covers(held, target) {
-			return domain.ErrCannotManageStrongerUser
-		}
-
-		if !actor.Covers(held, codes) {
-			return domain.ErrEscalation
 		}
 
 		ids := slicex.Map(wanted, func(r *domain.Role) int64 { return r.ID })
@@ -340,6 +294,53 @@ func (s *AccessService) SetUserRoles(ctx context.Context, userUUID uuid.UUID, ro
 	return s.repo.ListUserRoles(ctx, userID)
 }
 
+// lockUserRoleChange locks every role a change of the user's roles to roleUUIDs touches, then
+// returns the user's current roles and the wanted ones; a wanted system role is ErrSystemRole.
+func (s *AccessService) lockUserRoleChange(ctx context.Context, userID int64, roleUUIDs []uuid.UUID) (current, wanted []*domain.Role, err error) {
+	if current, err = s.repo.ListUserRoles(ctx, userID); err != nil {
+		return nil, nil, err
+	}
+
+	touched := slices.Clone(roleUUIDs)
+	for _, r := range current {
+		touched = append(touched, r.UUID)
+	}
+
+	if err := s.repo.LockRoles(ctx, touched); err != nil {
+		return nil, nil, err
+	}
+
+	if wanted, err = s.rolesByUUID(ctx, roleUUIDs); err != nil {
+		return nil, nil, err
+	}
+
+	for _, r := range wanted {
+		if r.IsSystem {
+			return nil, nil, domain.ErrSystemRole
+		}
+	}
+
+	return current, wanted, nil
+}
+
+// checkAssign allows the actor to change the user's roles by changed: read from the database, they
+// must hold roles:assign and every permission of the user (actor.ErrCannotManageStrongerUser)
+// and of each changed role (ErrEscalation).
+func (s *AccessService) checkAssign(ctx context.Context, userID int64, changed []*domain.Role) error {
+	held, err := actor.RequireManage(ctx, s.repo, userID, domain.RolesAssign)
+	if err != nil {
+		return err
+	}
+
+	for _, r := range changed {
+		if !actor.Covers(held, r.Permissions) {
+			return domain.ErrEscalation
+		}
+	}
+
+	return nil
+}
+
 // lockMutableRole locks the role uid until the transaction in ctx ends, then returns it unless it
 // is a system role (those are never changed through the API).
 func (s *AccessService) lockMutableRole(ctx context.Context, uid uuid.UUID) (*domain.Role, error) {
@@ -347,7 +348,7 @@ func (s *AccessService) lockMutableRole(ctx context.Context, uid uuid.UUID) (*do
 		return nil, err
 	}
 
-	role, err := s.GetRole(ctx, uid)
+	role, err := s.getRole(ctx, uid, false)
 	if err != nil {
 		return nil, err
 	}
@@ -385,15 +386,30 @@ func (s *AccessService) invalidateUsers(ctx context.Context, userIDs []int64) {
 	s.cache.InvalidateUsers(ctx, userIDs...)
 }
 
-// rolesByUUID returns the roles of uids (duplicates ignored), or ErrRoleNotFound if one is missing.
+// getRole returns the role uid; countUsers fills its user count.
+func (s *AccessService) getRole(ctx context.Context, uid uuid.UUID, countUsers bool) (*domain.Role, error) {
+	roles, err := s.repo.ListRoles(ctx, []uuid.UUID{uid}, countUsers)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(roles) == 0 {
+		return nil, domain.ErrRoleNotFound
+	}
+
+	return roles[0], nil
+}
+
+// rolesByUUID returns the roles of uids (duplicates ignored), without user counts, or
+// ErrRoleNotFound if one is missing.
 func (s *AccessService) rolesByUUID(ctx context.Context, uids []uuid.UUID) ([]*domain.Role, error) {
-	uids = slices.Compact(slices.SortedFunc(slices.Values(uids), func(a, b uuid.UUID) int { return slices.Compare(a[:], b[:]) }))
+	uids = sortedUniqueUUIDs(uids)
 	if len(uids) == 0 {
 		// Never call ListRoles with nil here: nil lists every role.
 		return nil, nil
 	}
 
-	roles, err := s.repo.ListRoles(ctx, uids)
+	roles, err := s.repo.ListRoles(ctx, uids, false)
 	if err != nil {
 		return nil, err
 	}
@@ -403,6 +419,33 @@ func (s *AccessService) rolesByUUID(ctx context.Context, uids []uuid.UUID) ([]*d
 	}
 
 	return roles, nil
+}
+
+// sortedUniqueUUIDs returns uids sorted, without duplicates.
+func sortedUniqueUUIDs(uids []uuid.UUID) []uuid.UUID {
+	sorted := slices.SortedFunc(slices.Values(uids), func(a, b uuid.UUID) int {
+		return slices.Compare(a[:], b[:])
+	})
+
+	return slices.Compact(sorted)
+}
+
+// changedRoles returns the UUIDs of the non-system roles in exactly one of current and wanted.
+func changedRoles(current, wanted []*domain.Role) []uuid.UUID {
+	var changed []uuid.UUID
+	for _, r := range wanted {
+		if !containsRole(current, r.UUID) {
+			changed = append(changed, r.UUID)
+		}
+	}
+
+	for _, r := range current {
+		if !r.IsSystem && !containsRole(wanted, r.UUID) {
+			changed = append(changed, r.UUID)
+		}
+	}
+
+	return changed
 }
 
 // containsRole reports whether roles has the role uid.

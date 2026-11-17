@@ -17,16 +17,16 @@ import (
 	"jungo/internal/features/user/domain"
 )
 
-// fakeUserRepository is a test double for domain.UserRepository; calling an unset Func panics.
+// fakeUserRepository is a test double for domain.UserRepository; calling an unset Func panics,
+// except LockFunc, which defaults to lockTarget.
 type fakeUserRepository struct {
-	CreateFunc     func(ctx context.Context, input domain.CreateUserInput, passwordHash string) (*domain.User, error)
-	GetByUUIDFunc  func(ctx context.Context, uid uuid.UUID) (*domain.User, error)
-	GetByEmailFunc func(ctx context.Context, email string) (*domain.User, error)
-	GetCredsFunc   func(ctx context.Context, email string) (*domain.Credentials, error)
-	ListFunc       func(ctx context.Context, filter domain.UserListFilter) ([]*domain.User, int64, error)
-	UpdateFunc     func(ctx context.Context, uid uuid.UUID, input domain.UpdateUserInput) (*domain.User, error)
-	DeleteFunc     func(ctx context.Context, uid uuid.UUID) error
-	LockFunc       func(ctx context.Context, uid uuid.UUID) (int64, error)
+	CreateFunc    func(ctx context.Context, input domain.CreateUserInput, passwordHash string) (*domain.User, error)
+	GetByUUIDFunc func(ctx context.Context, uid uuid.UUID) (*domain.User, error)
+	GetCredsFunc  func(ctx context.Context, email string) (*domain.Credentials, error)
+	ListFunc      func(ctx context.Context, filter domain.UserListFilter) ([]*domain.User, int64, error)
+	UpdateFunc    func(ctx context.Context, uid uuid.UUID, input domain.UpdateUserInput) (*domain.User, error)
+	DeleteFunc    func(ctx context.Context, uid uuid.UUID) error
+	LockFunc      func(ctx context.Context, uid uuid.UUID) (int64, error)
 }
 
 func (f *fakeUserRepository) WithTransaction(ctx context.Context, fn func(ctx context.Context) error) error {
@@ -39,10 +39,6 @@ func (f *fakeUserRepository) Create(ctx context.Context, input domain.CreateUser
 
 func (f *fakeUserRepository) GetByUUID(ctx context.Context, uid uuid.UUID) (*domain.User, error) {
 	return f.GetByUUIDFunc(ctx, uid)
-}
-
-func (f *fakeUserRepository) GetByEmail(ctx context.Context, email string) (*domain.User, error) {
-	return f.GetByEmailFunc(ctx, email)
 }
 
 func (f *fakeUserRepository) GetCredentialsByEmail(ctx context.Context, email string) (*domain.Credentials, error) {
@@ -66,10 +62,14 @@ func (f *fakeUserRepository) UpdatePassword(context.Context, int64, string) erro
 }
 
 func (f *fakeUserRepository) GetIDByUUID(ctx context.Context, uid uuid.UUID) (int64, error) {
-	return f.LockFunc(ctx, uid)
+	return f.LockByUUID(ctx, uid)
 }
 
 func (f *fakeUserRepository) LockByUUID(ctx context.Context, uid uuid.UUID) (int64, error) {
+	if f.LockFunc == nil {
+		return lockTarget(ctx, uid)
+	}
+
 	return f.LockFunc(ctx, uid)
 }
 
@@ -82,7 +82,7 @@ const (
 // lockTarget is a LockFunc resolving any UUID to targetUserID.
 func lockTarget(context.Context, uuid.UUID) (int64, error) { return targetUserID, nil }
 
-// fakePermissions is a domain.PermissionReader over a user ID -> codes map.
+// fakePermissions is an actor.TargetPermissionReader over a user ID -> codes map.
 type fakePermissions map[int64][]string
 
 func (f fakePermissions) GetActorAndTargetPermissions(_ context.Context, actorID, targetID int64) (actor, target []string, err error) {
@@ -119,10 +119,11 @@ func (f *fakeStorage) DeleteFile(ctx context.Context, fileURL string) error {
 	return nil
 }
 
-// fakeSessionRevoker records which users had their sessions revoked.
+// fakeSessionRevoker records which users had their sessions revoked and their cache dropped.
 type fakeSessionRevoker struct {
-	revoked []uuid.UUID
-	err     error
+	revoked     []uuid.UUID
+	invalidated []uuid.UUID
+	err         error
 }
 
 func (f *fakeSessionRevoker) RevokeUserSessions(_ context.Context, uid uuid.UUID) error {
@@ -130,7 +131,26 @@ func (f *fakeSessionRevoker) RevokeUserSessions(_ context.Context, uid uuid.UUID
 	return f.err
 }
 
-// newTestUserService builds a UserService with a fast bcrypt hasher and a no-op session revoker.
+func (f *fakeSessionRevoker) InvalidateUserSessions(_ context.Context, uid uuid.UUID) {
+	f.invalidated = append(f.invalidated, uid)
+}
+
+// noAvatar is a GetByUUIDFunc returning a user without an avatar.
+func noAvatar(_ context.Context, uid uuid.UUID) (*domain.User, error) {
+	return &domain.User{UUID: uid}, nil
+}
+
+// withActor returns a context whose actor is the user with uid and no permissions.
+func withActor(uid uuid.UUID) context.Context {
+	return actor.With(context.Background(), &actor.Actor{UserUUID: uid})
+}
+
+// withManager returns a context whose actor (actorUserID) holds managerPermissions.
+func withManager() context.Context {
+	return actor.With(context.Background(), &actor.Actor{UserID: actorUserID, UserUUID: uuid.New(), Permissions: managerPermissions})
+}
+
+// newTestUserService builds a UserService with a fast bcrypt hasher and a recording session revoker.
 func newTestUserService(t *testing.T, repo domain.UserRepository, storage *fakeStorage) *UserService {
 	t.Helper()
 	svc, _ := newTestUserServiceWithRevoker(t, repo, storage)
@@ -156,7 +176,16 @@ func newTestUserServiceWith(t *testing.T, repo domain.UserRepository, storage *f
 
 	revoker := &fakeSessionRevoker{}
 
-	return NewUserService(repo, perms, storage, hasher, revoker, zap.NewNop()), revoker
+	svc := NewUserService(UserServiceParams{
+		Repo:        repo,
+		Permissions: perms,
+		Storage:     storage,
+		Hasher:      hasher,
+		Sessions:    revoker,
+		Logger:      zap.NewNop(),
+	})
+
+	return svc, revoker
 }
 
 func strPtr(s string) *string { return &s }
@@ -218,7 +247,8 @@ func TestUserService_CreateUser(t *testing.T) {
 		}
 		svc := newTestUserService(t, repo, &fakeStorage{})
 
-		password := strings.Repeat("ệ", 30) // 30 characters, 90 bytes
+		// 30 characters, 90 bytes.
+		password := strings.Repeat("ệ", 30)
 		_, err := svc.CreateUser(context.Background(), domain.CreateUserInput{Password: password})
 		if !errors.Is(err, domain.ErrPasswordTooLong) {
 			t.Fatalf("CreateUser() error = %v, want %v", err, domain.ErrPasswordTooLong)
@@ -339,12 +369,14 @@ func TestUserService_UploadAvatar(t *testing.T) {
 		}
 	})
 
-	t.Run("propagates a GetByUUID error before touching storage", func(t *testing.T) {
+	t.Run("propagates a GetByUUID error and removes the new upload", func(t *testing.T) {
 		wantErr := errors.New("user not found")
 		repo := &fakeUserRepository{
 			GetByUUIDFunc: func(context.Context, uuid.UUID) (*domain.User, error) { return nil, wantErr },
 		}
-		storage := &fakeStorage{}
+		storage := &fakeStorage{
+			UploadFileFunc: func(context.Context, string) (string, error) { return "new/avatar.png", nil },
+		}
 		svc := newTestUserService(t, repo, storage)
 
 		_, err := svc.UploadAvatar(withActor(userID), userID, domain.AvatarFile{Filename: "me.png"})
@@ -352,8 +384,8 @@ func TestUserService_UploadAvatar(t *testing.T) {
 			t.Fatalf("UploadAvatar() error = %v, want %v", err, wantErr)
 		}
 
-		if len(storage.uploadCalls) != 0 {
-			t.Errorf("UploadFile called %d times, want 0", len(storage.uploadCalls))
+		if len(storage.deleteCalls) != 1 || storage.deleteCalls[0] != "new/avatar.png" {
+			t.Errorf("DeleteFile calls = %v, want exactly [\"new/avatar.png\"]", storage.deleteCalls)
 		}
 	})
 }
@@ -489,7 +521,7 @@ func TestUserService_GetUser(t *testing.T) {
 	}
 }
 
-func TestUserService_GetUsers(t *testing.T) {
+func TestUserService_ListUsers(t *testing.T) {
 	filter := domain.UserListFilter{Search: "jane", Limit: 10, Offset: 0, SortOrder: "asc"}
 	wantUsers := []*domain.User{{Email: "jane@example.com"}}
 	repo := &fakeUserRepository{
@@ -503,13 +535,13 @@ func TestUserService_GetUsers(t *testing.T) {
 	}
 	svc := newTestUserService(t, repo, &fakeStorage{})
 
-	users, total, err := svc.GetUsers(context.Background(), filter)
+	users, total, err := svc.ListUsers(context.Background(), filter)
 	if err != nil {
-		t.Fatalf("GetUsers() error = %v, want nil", err)
+		t.Fatalf("ListUsers() error = %v, want nil", err)
 	}
 
 	if total != 1 || len(users) != 1 {
-		t.Errorf("GetUsers() = (%v, %d), want ([1 user], 1)", users, total)
+		t.Errorf("ListUsers() = (%v, %d), want ([1 user], 1)", users, total)
 	}
 }
 
@@ -600,6 +632,10 @@ func TestUserService_UpdateUser_DeactivationRevokesSessions(t *testing.T) {
 
 	if len(revoker.revoked) != 1 || revoker.revoked[0] != userID {
 		t.Errorf("revoked = %v, want [%v]", revoker.revoked, userID)
+	}
+
+	if len(revoker.invalidated) != 1 || revoker.invalidated[0] != userID {
+		t.Errorf("invalidated = %v, want [%v] (cached sessions dropped after the commit)", revoker.invalidated, userID)
 	}
 }
 
@@ -703,8 +739,8 @@ func TestUserService_UploadAvatar_ReauthorizesAfterUpload(t *testing.T) {
 	svc, _ := newTestUserServiceWith(t, repo, storage, db)
 
 	_, err := svc.UploadAvatar(withManager(), uuid.New(), domain.AvatarFile{Filename: "a.png"})
-	if !errors.Is(err, domain.ErrCannotManageStrongerUser) {
-		t.Fatalf("UploadAvatar() error = %v, want %v", err, domain.ErrCannotManageStrongerUser)
+	if !errors.Is(err, actor.ErrCannotManageStrongerUser) {
+		t.Fatalf("UploadAvatar() error = %v, want %v", err, actor.ErrCannotManageStrongerUser)
 	}
 
 	if wrote {
@@ -714,21 +750,6 @@ func TestUserService_UploadAvatar_ReauthorizesAfterUpload(t *testing.T) {
 	if len(storage.deleteCalls) != 1 || storage.deleteCalls[0] != "new.png" {
 		t.Errorf("deleted files = %v, want the new upload [new.png]", storage.deleteCalls)
 	}
-}
-
-// noAvatar is a GetByUUIDFunc returning a user without an avatar.
-func noAvatar(_ context.Context, uid uuid.UUID) (*domain.User, error) {
-	return &domain.User{UUID: uid}, nil
-}
-
-// withActor returns a context whose actor is the user with uid and no permissions.
-func withActor(uid uuid.UUID) context.Context {
-	return actor.With(context.Background(), &actor.Actor{UserUUID: uid})
-}
-
-// withManager returns a context whose actor (actorUserID) holds managerPermissions.
-func withManager() context.Context {
-	return actor.With(context.Background(), &actor.Actor{UserID: actorUserID, UserUUID: uuid.New(), Permissions: managerPermissions})
 }
 
 func TestUserService_ActingOnUsers(t *testing.T) {
@@ -742,14 +763,16 @@ func TestUserService_ActingOnUsers(t *testing.T) {
 		name   string
 		ctx    context.Context
 		target uuid.UUID
-		db     fakePermissions // actorUserID's and targetUserID's permissions in the database
-		delete bool            // DeleteUser instead of UpdateUser(deactivate)
+		// db holds actorUserID's and targetUserID's permissions in the database; delete calls
+		// DeleteUser instead of UpdateUser(deactivate).
+		db     fakePermissions
+		delete bool
 		want   error
 	}{
 		{"weaker target", withManager(), uuid.New(), fakePermissions{actorUserID: managerPermissions, targetUserID: {domain.UsersRead}}, false, nil},
 		{"equal target", withManager(), uuid.New(), fakePermissions{actorUserID: managerPermissions, targetUserID: managerPermissions}, true, nil},
-		{"stronger target", withManager(), uuid.New(), fakePermissions{actorUserID: managerPermissions, targetUserID: {domain.UsersRead, "roles:assign"}}, false, domain.ErrCannotManageStrongerUser},
-		{"stronger target, delete", withManager(), uuid.New(), fakePermissions{actorUserID: managerPermissions, targetUserID: {"roles:assign"}}, true, domain.ErrCannotManageStrongerUser},
+		{"stronger target", withManager(), uuid.New(), fakePermissions{actorUserID: managerPermissions, targetUserID: {domain.UsersRead, "roles:assign"}}, false, actor.ErrCannotManageStrongerUser},
+		{"stronger target, delete", withManager(), uuid.New(), fakePermissions{actorUserID: managerPermissions, targetUserID: {"roles:assign"}}, true, actor.ErrCannotManageStrongerUser},
 		{"permission removed since the request's cache", withManager(), uuid.New(), fakePermissions{actorUserID: {domain.UsersRead}}, false, actor.ErrForbidden},
 		{"no permission hides the user", noPermission, uuid.New(), nil, false, domain.ErrUserNotFound},
 		{"no actor hides the user", context.Background(), uuid.New(), nil, true, domain.ErrUserNotFound},

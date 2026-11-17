@@ -1,6 +1,22 @@
 name: ${APP_NAME:-jungo}
 
 services:
+  # Applies the migrations built into the image (console db:migrate), then exits; app waits for it.
+  migrate:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.app
+      target: prod
+    entrypoint: ["./console", "db:migrate"]
+    env_file:
+      - ../.env
+    environment:
+      API_ENVIRONMENT: production
+    depends_on:
+      postgresql:
+        condition: service_healthy
+    restart: "no"
+
   app:
     build:
       context: ..
@@ -10,14 +26,22 @@ services:
       - "${API_SERVER_PORT:-8080}:${API_SERVER_PORT:-8080}"
     env_file:
       - ../.env
+    # Forced here, whatever .env says: the prod stack never runs with development defaults
+    # (emails written to the log, reCAPTCHA mock, Gin debug output).
     environment:
+      API_ENVIRONMENT: production
+      GIN_MODE: release
       GOMEMLIMIT: ${APP_GOMEMLIMIT:-1800MiB}
     volumes:
       - storage:/app/storage
     depends_on:
       postgresql:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     restart: unless-stopped
+    # Longer than Fx's 15s stop timeout, so in-flight requests finish before SIGKILL.
+    stop_grace_period: 20s
     deploy:
       resources:
         limits:
@@ -48,6 +72,8 @@ services:
   redis:
     image: redis:7-alpine
     profiles: ["cache", "full"]
+    # Evicts keys with a TTL (every key the app writes has one) before the container's memory limit.
+    command: ["redis-server", "--maxmemory", "200mb", "--maxmemory-policy", "volatile-lru"]
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]

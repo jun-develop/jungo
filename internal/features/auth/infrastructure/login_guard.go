@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"go.uber.org/fx"
@@ -24,15 +25,16 @@ const notifyTimeout = 5 * time.Second
 type LoginGuardParams struct {
 	fx.In
 
-	CacheOptions cache.Options
-	Config       *config.Config
-	Logger       *zap.Logger
-	Telegram     telegram.Client `optional:"true"`
+	Lifecycle fx.Lifecycle
+	Cache     *cache.Store
+	Config    *config.Config
+	Logger    *zap.Logger
+	Telegram  telegram.Client `optional:"true"`
 }
 
-// LoginGuard implements domain.LoginGuard with fixed-window counters per IP (short window and
-// blacklist window) and per email. The short-window and email counters count every attempt up
-// front and are cleared on success; the blacklist counter counts failures only.
+// LoginGuard implements domain.LoginGuard with fixed-window counters per client IP: a short-window
+// counter of every attempt, cleared on success, and a blacklist counter of failures only. Logins
+// are not counted per email: anyone could then lock any account out by failing on purpose.
 type LoginGuard struct {
 	counters cache.Cache[int64]
 	cfg      config.AuthConfig
@@ -40,74 +42,78 @@ type LoginGuard struct {
 	env      string
 	logger   *zap.Logger
 	telegram telegram.Client
+
+	// alerts tracks Telegram alerts still sending, so shutdown waits for them.
+	alerts sync.WaitGroup
 }
 
 // NewLoginGuard creates a LoginGuard; it counts in memory when Redis is disabled.
 func NewLoginGuard(p LoginGuardParams) *LoginGuard {
-	return &LoginGuard{
-		counters: cache.New[int64](p.CacheOptions.OrMemory()),
+	g := &LoginGuard{
+		counters: cache.New[int64](p.Cache.OrMemory()),
 		cfg:      p.Config.Auth,
 		chatID:   p.Config.Telegram.ChatID,
 		env:      p.Config.Environment,
 		logger:   p.Logger,
 		telegram: p.Telegram,
 	}
+
+	p.Lifecycle.Append(fx.StopHook(func(ctx context.Context) error {
+		return waitOrTimeout(ctx, &g.alerts)
+	}))
+
+	return g
 }
 
 // Attempt implements domain.LoginGuard; it returns ErrIPBlocked or ErrTooManyAttempts when blocked.
-// The email is checked first, so a blocked email does not use up the IP's attempts. A cache error
-// refuses the attempt, so an outage cannot turn throttling off.
-func (g *LoginGuard) Attempt(ctx context.Context, ip, email string) (int64, error) {
-	if n, _ := g.counters.Get(ctx, ipLongKey(ip)); n >= g.cfg.LoginBlacklistAttempts {
+// A cache error refuses the attempt, so an outage cannot turn throttling off.
+func (g *LoginGuard) Attempt(ctx context.Context, ip string) (int64, error) {
+	if failures, _ := g.counters.Get(ctx, ipBlacklistKey(ip)); failures >= g.cfg.LoginBlacklistAttempts {
 		return 0, domain.ErrIPBlocked
 	}
 
-	perEmail, err := g.incr(ctx, emailKey(email), g.cfg.LoginBlockWindow)
+	attempts, err := g.incr(ctx, ipAttemptsKey(ip), g.cfg.LoginBlockWindow)
 	if err != nil {
 		return 0, err
 	}
 
-	if perEmail > g.cfg.LoginEmailMaxAttempts {
+	if attempts > g.cfg.LoginMaxAttempts {
 		return 0, domain.ErrTooManyAttempts
 	}
 
-	short, err := g.incr(ctx, ipShortKey(ip), g.cfg.LoginBlockWindow)
-	if err != nil {
-		return 0, err
-	}
-
-	if short > g.cfg.LoginMaxAttempts {
-		return 0, domain.ErrTooManyAttempts
-	}
-
-	return g.cfg.LoginMaxAttempts - short, nil
+	return g.cfg.LoginMaxAttempts - attempts, nil
 }
 
 // RecordFailure implements domain.LoginGuard; it counts the failure towards the IP blacklist.
 func (g *LoginGuard) RecordFailure(ctx context.Context, ip string) {
-	long, err := g.incr(ctx, ipLongKey(ip), g.cfg.LoginBlacklistWindow)
+	failures, err := g.incr(ctx, ipBlacklistKey(ip), g.cfg.LoginBlacklistWindow)
 	if err != nil {
 		return
 	}
 
-	if long == g.cfg.LoginBlacklistAttempts {
-		g.logger.Warn("login guard: IP blacklisted after repeated failures", zap.String("ip", ip), zap.String("blocked", security.ClientKey(ip)), zap.Int64("failures", long))
-		g.notifyBlacklisted(ctx, ip, long)
+	if failures == g.cfg.LoginBlacklistAttempts {
+		g.logger.Warn("login guard: IP blacklisted after repeated failures",
+			zap.String("ip", ip),
+			zap.String("blocked", security.ClientKey(ip)),
+			zap.Int64("failures", failures),
+		)
+		g.notifyBlacklisted(ctx, ip, failures)
 	}
 }
 
-// Succeeded implements domain.LoginGuard; it clears the short-window counters but keeps the
+// RecordSuccess implements domain.LoginGuard; it clears the short-window counter but keeps the
 // blacklist counter, so logging into an attacker-owned account cannot reset it.
-func (g *LoginGuard) Succeeded(ctx context.Context, ip, email string) {
-	_ = g.counters.Delete(ctx, ipShortKey(ip))
-	_ = g.counters.Delete(ctx, emailKey(email))
+func (g *LoginGuard) RecordSuccess(ctx context.Context, ip string) {
+	if err := g.counters.Delete(ctx, ipAttemptsKey(ip)); err != nil {
+		g.logger.Warn("login guard: clear attempts failed", zap.Error(err))
+	}
 }
 
 // AttemptPasswordReset implements domain.LoginGuard; it counts every request per IP, then per
 // email whether or not the email is registered, and returns ErrTooManyResetRequests over either
 // limit. This caps the emails one client can make us send. A cache error refuses the request.
 func (g *LoginGuard) AttemptPasswordReset(ctx context.Context, ip, email string) error {
-	perIP, err := g.incr(ctx, "auth:reset:ip:"+security.ClientKey(ip), g.cfg.PasswordResetWindow)
+	perIP, err := g.incr(ctx, resetIPKey(ip), g.cfg.PasswordResetWindow)
 	if err != nil {
 		return err
 	}
@@ -116,7 +122,7 @@ func (g *LoginGuard) AttemptPasswordReset(ctx context.Context, ip, email string)
 		return domain.ErrTooManyResetRequests
 	}
 
-	perEmail, err := g.incr(ctx, "auth:reset:email:"+hashEmail(email), g.cfg.PasswordResetWindow)
+	perEmail, err := g.incr(ctx, resetEmailKey(email), g.cfg.PasswordResetWindow)
 	if err != nil {
 		return err
 	}
@@ -128,12 +134,11 @@ func (g *LoginGuard) AttemptPasswordReset(ctx context.Context, ip, email string)
 	return nil
 }
 
-// incr increments a counter, logging a failure.
+// incr increments a counter; the caller returns the error, which the access log records.
 func (g *LoginGuard) incr(ctx context.Context, key string, ttl time.Duration) (int64, error) {
 	n, err := g.counters.Incr(ctx, key, ttl)
 	if err != nil {
-		g.logger.Error("login guard: increment counter failed", zap.String("key", key), zap.Error(err))
-		return 0, fmt.Errorf("increment login counter: %w", err)
+		return 0, fmt.Errorf("login guard: increment %s: %w", key, err)
 	}
 
 	return n, nil
@@ -152,31 +157,49 @@ func (g *LoginGuard) notifyBlacklisted(ctx context.Context, ip string, failures 
 		"⛔ <b>Action:</b> IP blocked for <b>%s</b> (%d failed attempts).",
 		g.env, ip, security.ClientKey(ip), time.Now().Format(time.DateTime), g.cfg.LoginBlacklistWindow, failures)
 
-	go func() {
+	g.alerts.Go(func() {
 		sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), notifyTimeout)
 		defer cancel()
+
 		if err := g.telegram.SendMessage(sendCtx, g.chatID, msg); err != nil {
 			g.logger.Error("login guard: telegram alert failed", zap.Error(err))
 		}
+	})
+}
+
+// waitOrTimeout waits for wg, or until ctx (Fx's stop timeout) ends.
+func waitOrTimeout(ctx context.Context, wg *sync.WaitGroup) error {
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
 	}()
+
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
-// ipShortKey returns the short-window counter key for ip.
-func ipShortKey(ip string) string {
-	return "auth:login:ip:short:" + security.ClientKey(ip)
+// ipAttemptsKey returns the short-window attempts counter key for ip.
+func ipAttemptsKey(ip string) string {
+	return "auth:login:ip:attempts:" + security.ClientKey(ip)
 }
 
-// ipLongKey returns the long-window counter key for ip.
-func ipLongKey(ip string) string {
-	return "auth:login:ip:long:" + security.ClientKey(ip)
+// ipBlacklistKey returns the blacklist (failures) counter key for ip.
+func ipBlacklistKey(ip string) string {
+	return "auth:login:ip:failures:" + security.ClientKey(ip)
 }
 
-// emailKey returns the counter key for email (hashed, so addresses are not stored).
-func emailKey(email string) string {
-	return "auth:login:email:" + hashEmail(email)
+// resetIPKey returns the password reset counter key for ip.
+func resetIPKey(ip string) string {
+	return "auth:reset:ip:" + security.ClientKey(ip)
 }
 
-// hashEmail returns a normalized, hashed email for counter keys, so addresses are not stored.
-func hashEmail(email string) string {
-	return security.HashToken(strings.ToLower(strings.TrimSpace(email)))
+// resetEmailKey returns the password reset counter key for email (hashed, so addresses are not
+// stored).
+func resetEmailKey(email string) string {
+	return "auth:reset:email:" + security.HashToken(strings.ToLower(strings.TrimSpace(email)))
 }

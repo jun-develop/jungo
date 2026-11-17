@@ -7,6 +7,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	kitmw "github.com/jun-develop/junkit/middleware"
 	"github.com/jun-develop/junkit/response"
 	"github.com/jun-develop/junkit/security"
 )
@@ -25,30 +26,30 @@ func (f AuthenticatorFunc[T]) Authenticate(ctx context.Context, token string) (T
 	return f(ctx, token)
 }
 
-// BearerAuthOptions configures BearerAuth.
-type BearerAuthOptions struct {
-	// MessageKey is the i18n key for a missing token (defaults to "unauthorized_token").
-	MessageKey string
-}
+// InternalSecretHeader carries AUTH_INTERNAL_SECRET on service-to-service calls.
+const InternalSecretHeader = "X-Internal-Secret"
 
-// BearerAuth authenticates "Authorization: Bearer <token>" and stores the identity via
-// security.SetIdentity.
+// Authenticate is the bearer-token middleware the auth feature provides. Routers depend on this
+// type, not on the auth feature, to protect their routes.
 //
 // Usage:
 //
-//	auth := middleware.BearerAuth(authenticator, responder, middleware.BearerAuthOptions{})
+//	users := group.Group("/users", gin.HandlerFunc(r.authenticate))
+type Authenticate gin.HandlerFunc
+
+// BearerAuth authenticates "Authorization: Bearer <token>" and stores the identity via
+// kitmw.SetIdentity (request context).
+//
+// Usage:
+//
+//	auth := middleware.BearerAuth(authenticator, responder)
 //	protected := router.Group("", auth)
 //	identity := security.MustGetIdentity[*domain.Identity](c) // in handlers
-func BearerAuth[T any](a Authenticator[T], responder response.Responder, opts BearerAuthOptions) gin.HandlerFunc {
-	messageKey := opts.MessageKey
-	if messageKey == "" {
-		messageKey = "unauthorized_token"
-	}
-
+func BearerAuth[T any](a Authenticator[T], responder response.Responder) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		token, ok := BearerToken(c)
 		if !ok {
-			responder.Send(c, http.StatusUnauthorized, messageKey)
+			responder.Send(c, http.StatusUnauthorized, "unauthorized_token")
 			c.Abort()
 
 			return
@@ -62,7 +63,7 @@ func BearerAuth[T any](a Authenticator[T], responder response.Responder, opts Be
 			return
 		}
 
-		security.SetIdentity(c, identity)
+		kitmw.SetIdentity(c, identity)
 		c.Next()
 	}
 }
@@ -92,7 +93,7 @@ func BearerToken(c *gin.Context) (string, bool) {
 //
 // Usage:
 //
-//	guard := middleware.RequireSecret("X-Internal-Secret", secret, responder)
+//	guard := middleware.RequireSecret(middleware.InternalSecretHeader, secret, responder)
 //	internal := router.Group("/internal", guard)
 func RequireSecret(header, secret string, responder response.Responder) gin.HandlerFunc {
 	return func(c *gin.Context) {

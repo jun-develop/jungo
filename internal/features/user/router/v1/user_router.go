@@ -5,10 +5,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/jun-develop/junkit/response"
+	"github.com/jun-develop/junkit/apidoc"
 
-	authdomain "jungo/internal/features/auth/domain"
 	"jungo/internal/features/user/domain"
+	v1dto "jungo/internal/features/user/dto/v1"
 	v1handler "jungo/internal/features/user/handler/v1"
 	"jungo/internal/middleware"
 	"jungo/internal/router"
@@ -16,15 +16,14 @@ import (
 
 // UserRoutes registers the user feature's endpoints under a version group.
 type UserRoutes struct {
-	handler       *v1handler.UserHandler
-	authenticator middleware.Authenticator[*authdomain.Identity]
-	guard         *middleware.Guard
-	responder     response.Responder
+	handler      *v1handler.UserHandler
+	authenticate middleware.Authenticate
+	guard        *middleware.Guard
 }
 
 // NewUserRoutes creates a UserRoutes.
-func NewUserRoutes(handler *v1handler.UserHandler, authenticator middleware.Authenticator[*authdomain.Identity], guard *middleware.Guard, responder response.Responder) *UserRoutes {
-	return &UserRoutes{handler: handler, authenticator: authenticator, guard: guard, responder: responder}
+func NewUserRoutes(handler *v1handler.UserHandler, authenticate middleware.Authenticate, guard *middleware.Guard) *UserRoutes {
+	return &UserRoutes{handler: handler, authenticate: authenticate, guard: guard}
 }
 
 // Version implements router.Versioned; routes are nested under "/api/v1".
@@ -36,8 +35,7 @@ func (r *UserRoutes) Version() string {
 // act on a single user: the service allows the user themself, or a holder of the permission who
 // also holds every permission of that user (UserService.authorize).
 func (r *UserRoutes) Register(group *gin.RouterGroup) {
-	users := group.Group("/users")
-	users.Use(middleware.BearerAuth(r.authenticator, r.responder, middleware.BearerAuthOptions{}))
+	users := group.Group("/users", gin.HandlerFunc(r.authenticate))
 
 	users.POST("", r.guard.Can(r.handler.CreateUser, domain.UsersCreate))
 	users.GET("", r.guard.Can(r.handler.ListUsers, domain.UsersRead))
@@ -59,5 +57,20 @@ func (r *UserRoutes) BodyLimits() []router.BodyLimit {
 			Path:     "/users/:uuid/avatar",
 			MaxBytes: v1handler.MaxAvatarFileSize + multipartOverhead,
 		},
+	}
+}
+
+// Docs implements router.Documented.
+func (r *UserRoutes) Docs() []apidoc.Route {
+	user := v1dto.UserResponse{}
+
+	return []apidoc.Route{
+		{Method: http.MethodPost, Path: "/users", Summary: "Create a user", Body: v1dto.CreateUserRequest{}, Status: http.StatusCreated, Response: user},
+		{Method: http.MethodGet, Path: "/users", Summary: "List users", Query: v1dto.ListUsersRequest{}, Response: user, Paginated: true},
+		{Method: http.MethodGet, Path: "/users/:uuid", Summary: "Get a user", Description: "Yourself, or any user with users:read.", Response: user},
+		{Method: http.MethodPatch, Path: "/users/:uuid", Summary: "Update a user", Description: "Yourself, or any user with users:update.", Body: v1dto.UpdateUserRequest{}, Response: user},
+		{Method: http.MethodDelete, Path: "/users/:uuid", Summary: "Delete a user"},
+		{Method: http.MethodPost, Path: "/users/:uuid/avatar", Summary: "Upload an avatar", Description: "JPEG, PNG or WebP, up to 5 MB.", Files: []string{"avatar"}, Response: user},
+		{Method: http.MethodDelete, Path: "/users/:uuid/avatar", Summary: "Delete the avatar", Response: user},
 	}
 }
