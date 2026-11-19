@@ -53,7 +53,7 @@ a reference for the `junkit` packages.
 | **[`golang-migrate`](https://github.com/golang-migrate/migrate) CLI** | `make migrate-*` — applying database migrations. It always runs from your host, pointed at the Postgres port the dev stack exposes (the prod stack exposes none) | `brew install golang-migrate` | `scoop install migrate` (needs [Scoop](https://scoop.sh) — see below) |
 | **`psql`** (PostgreSQL client) | `make migrate-up` / `make migrate-functions` / `make db-seed` — applying the SQL functions and demo seeders. Like `migrate`, it runs from your host against the exposed Postgres port | `brew install libpq && brew link --force libpq` (client only, no server) | `scoop install postgresql` (includes `psql`) |
 | **[`sqlc`](https://sqlc.dev)** | `make sqlc` — regenerating `internal/database/primary/sqlc` after you change a query, and after every `make feature` (a generated feature does not build before). Not needed just to run the app | `brew install sqlc` | Download the Windows binary from the [sqlc releases page](https://github.com/sqlc-dev/sqlc/releases) |
-| **Go 1.26.5** *(optional)* | Only if you run things outside Docker (`go build`, `go test`, `go run ./cmd/console`, ...) | `brew install go` | [go.dev/dl](https://go.dev/dl/) |
+| **Go 1.27.4** *(optional)* | Only if you run things outside Docker (`go build`, `go test`, `go run ./cmd/console`, ...) | `brew install go` | [go.dev/dl](https://go.dev/dl/) |
 
 Windows without [Scoop](https://scoop.sh) yet: install it first, in a regular (non-admin)
 PowerShell terminal, then run `scoop install migrate postgresql` as above.

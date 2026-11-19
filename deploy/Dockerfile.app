@@ -3,7 +3,7 @@
 # =============================================================================
 # base — shared dependency layer
 # =============================================================================
-FROM golang:1.26-alpine AS base
+FROM golang:1.27-alpine AS base
 WORKDIR /app
 RUN apk add --no-cache git
 COPY go.mod go.sum ./
