@@ -5,9 +5,8 @@ package service
 // =============================================================================
 //
 // File: fakes_test.go
-// Purpose: In-memory fakes for AccessService: a repository (AccessRepository + UserLookup)
-//          mirroring the SQL, a permission cache that records invalidations, fixed users and
-//          roles, and helpers to build a service and an acting user.
+// Purpose: Func-field fakes for AccessService (repository, user lookup, permission cache), the
+//          roles and users the tests use, answer builders, and a constructor for the service.
 // Used by: access_service_test.go
 //
 // =============================================================================
@@ -16,6 +15,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"testing"
 
 	"github.com/google/uuid"
 
@@ -30,238 +30,157 @@ const (
 	usersDelete = "users:delete"
 )
 
-// allPermissions is the "permissions" Fx group the tests' AccessService receives.
+// allPermissions is the "permissions" Fx group the service receives: every code a feature uses.
 var allPermissions = append([]string{usersRead, usersUpdate, usersDelete}, domain.Permissions...)
 
-// The fake users' IDs; actorID is the user asActor acts as.
+// actorID is the user every test acts as; targetID is the user whose roles they change.
 const (
-	userA   int64 = 10
-	userB   int64 = 20
-	userC   int64 = 30
-	actorID int64 = 99
+	actorID  int64 = 99
+	targetID int64 = 10
 )
 
-// The fake roles' IDs, in newFakeRepository's order.
-const (
-	superAdminRoleID int64 = 1
-	managerRoleID    int64 = 2
+// Fixed UUIDs, so a failure prints the same values on every run.
+var (
+	actorUUID      = uuid.MustParse("00000000-0000-0000-0000-000000000099")
+	targetUUID     = uuid.MustParse("00000000-0000-0000-0000-000000000010")
+	superAdminUUID = uuid.MustParse("00000000-0000-0000-0000-0000000000a1")
+	managerUUID    = uuid.MustParse("00000000-0000-0000-0000-0000000000a2")
+	extraUUID      = uuid.MustParse("00000000-0000-0000-0000-0000000000a3")
 )
 
-// userUUIDs maps the fake users' IDs to their UUIDs.
-var userUUIDs = map[int64]uuid.UUID{userA: uuid.New(), userB: uuid.New(), userC: uuid.New()}
+// errDB stands in for a failing database.
+var errDB = errors.New("fake database: connection lost")
 
-// errRepo is the error a fake method returns when the test makes it fail.
-var errRepo = errors.New("fake repository: connection lost")
+// superAdmin returns the system role granting perms; the API never changes or assigns it.
+func superAdmin(perms ...string) *domain.Role {
+	return &domain.Role{ID: 1, UUID: superAdminUUID, Code: "super_admin", IsSystem: true, Permissions: perms}
+}
 
-// fakeRepository is an in-memory AccessRepository and UserLookup mirroring the SQL.
+// manager returns a non-system role granting perms.
+func manager(perms ...string) *domain.Role {
+	return &domain.Role{ID: 2, UUID: managerUUID, Code: "manager", Name: "Manager", Permissions: perms}
+}
+
+// extra returns a second non-system role granting perms.
+func extra(perms ...string) *domain.Role {
+	return &domain.Role{ID: 3, UUID: extraUUID, Code: "extra", Name: "Extra", Permissions: perms}
+}
+
+// fakeRepository is a domain.AccessRepository and domain.UserLookup whose answers each test sets
+// through the Func fields. Calling a method whose Func is nil panics, except LockRoles, which
+// succeeds: every write locks its roles first, and the lock decides nothing a test checks.
 type fakeRepository struct {
-	// permissions maps each code to its group.
-	permissions map[string]string
-	roles       []*domain.Role
+	GetUserPermissionsFunc           func(ctx context.Context, userID int64) ([]string, error)
+	GetActorAndTargetPermissionsFunc func(ctx context.Context, actorID, targetID int64) ([]string, []string, error)
+	ListPermissionsFunc              func(ctx context.Context) ([]domain.Permission, error)
 
-	// grants maps a role ID to its codes; userRoles a user ID to their role IDs; actorPerms a user
-	// ID to codes for actors that hold no role here.
-	grants     map[int64][]string
-	userRoles  map[int64][]int64
-	actorPerms map[int64][]string
+	CreateRoleFunc             func(ctx context.Context, code, name string) (*domain.Role, error)
+	ListRolesFunc              func(ctx context.Context, uids []uuid.UUID, countUsers bool) ([]*domain.Role, error)
+	LockRolesFunc              func(ctx context.Context, uids []uuid.UUID) error
+	UpdateRoleNameFunc         func(ctx context.Context, roleID int64, name string) error
+	DeleteRoleFunc             func(ctx context.Context, roleID int64) error
+	ReplaceRolePermissionsFunc func(ctx context.Context, roleID int64, codes []string) error
+	ListUserIDsByRoleFunc      func(ctx context.Context, roleID int64, limit int32) ([]int64, error)
 
-	// failing names the methods that return errRepo instead of answering.
-	failing []string
+	ListUserRolesFunc    func(ctx context.Context, userID int64) ([]*domain.Role, error)
+	ReplaceUserRolesFunc func(ctx context.Context, userID int64, roleIDs []int64) error
+	GetUserIDFunc        func(ctx context.Context, uid uuid.UUID) (int64, error)
+	LockUserFunc         func(ctx context.Context, uid uuid.UUID) (int64, error)
 }
 
-// newFakeRepository returns a repository holding every permission in allPermissions, as after the
-// migrations, plus super_admin and manager.
-func newFakeRepository() *fakeRepository {
-	perms := make(map[string]string, len(allPermissions))
-	for _, code := range allPermissions {
-		perms[code] = "group"
-	}
-
-	return &fakeRepository{
-		permissions: perms,
-		roles: []*domain.Role{
-			{ID: superAdminRoleID, UUID: uuid.New(), Code: "super_admin", IsSystem: true},
-			{ID: managerRoleID, UUID: uuid.New(), Code: "manager"},
-		},
-		grants:     map[int64][]string{},
-		userRoles:  map[int64][]int64{},
-		actorPerms: map[int64][]string{},
-	}
-}
-
-// fails reports whether the test made method fail.
-func (r *fakeRepository) fails(method string) bool {
-	return slices.Contains(r.failing, method)
-}
-
+// WithTransaction runs fn directly: the fake has nothing to commit or roll back.
 func (r *fakeRepository) WithTransaction(ctx context.Context, fn func(ctx context.Context) error) error {
 	return fn(ctx)
 }
 
-func (r *fakeRepository) GetUserPermissions(_ context.Context, userID int64) ([]string, error) {
-	codes := slices.Clone(r.actorPerms[userID])
-	for _, roleID := range r.userRoles[userID] {
-		codes = append(codes, r.grants[roleID]...)
-	}
-
-	return slices.Compact(slices.Sorted(slices.Values(codes))), nil
+// GetUserPermissions answers through GetUserPermissionsFunc.
+func (r *fakeRepository) GetUserPermissions(ctx context.Context, userID int64) ([]string, error) {
+	return r.GetUserPermissionsFunc(ctx, userID)
 }
 
-func (r *fakeRepository) GetActorAndTargetPermissions(ctx context.Context, actorID, targetID int64) ([]string, []string, error) {
-	held, _ := r.GetUserPermissions(ctx, actorID)
-	target, _ := r.GetUserPermissions(ctx, targetID)
-
-	return held, target, nil
+// GetActorAndTargetPermissions answers through GetActorAndTargetPermissionsFunc.
+func (r *fakeRepository) GetActorAndTargetPermissions(
+	ctx context.Context,
+	actorID, targetID int64,
+) ([]string, []string, error) {
+	return r.GetActorAndTargetPermissionsFunc(ctx, actorID, targetID)
 }
 
-func (r *fakeRepository) ListPermissions(context.Context) ([]domain.Permission, error) {
-	if r.fails("ListPermissions") {
-		return nil, errRepo
-	}
-
-	var perms []domain.Permission
-	for code, group := range r.permissions {
-		perms = append(perms, domain.Permission{Code: code, Group: group})
-	}
-
-	return perms, nil
+// ListPermissions answers through ListPermissionsFunc.
+func (r *fakeRepository) ListPermissions(ctx context.Context) ([]domain.Permission, error) {
+	return r.ListPermissionsFunc(ctx)
 }
 
-func (r *fakeRepository) CreateRole(_ context.Context, code, name string) (*domain.Role, error) {
-	if _, err := r.GetRoleByCode(context.Background(), code); err == nil {
-		return nil, domain.ErrRoleAlreadyExists
-	}
-
-	role := &domain.Role{ID: int64(len(r.roles) + 1), UUID: uuid.New(), Code: code, Name: name}
-	r.roles = append(r.roles, role)
-
-	return role, nil
+// CreateRole answers through CreateRoleFunc.
+func (r *fakeRepository) CreateRole(ctx context.Context, code, name string) (*domain.Role, error) {
+	return r.CreateRoleFunc(ctx, code, name)
 }
 
-func (r *fakeRepository) GetRoleByCode(_ context.Context, code string) (*domain.Role, error) {
-	for _, role := range r.roles {
-		if role.Code == code {
-			return role, nil
-		}
-	}
-
-	return nil, domain.ErrRoleNotFound
+// ListRoles answers through ListRolesFunc.
+func (r *fakeRepository) ListRoles(ctx context.Context, uids []uuid.UUID, countUsers bool) ([]*domain.Role, error) {
+	return r.ListRolesFunc(ctx, uids, countUsers)
 }
 
-func (r *fakeRepository) ListRoles(_ context.Context, uuids []uuid.UUID, countUsers bool) ([]*domain.Role, error) {
-	if r.fails("ListRoles") {
-		return nil, errRepo
+// LockRoles answers through LockRolesFunc, or succeeds when it is nil.
+func (r *fakeRepository) LockRoles(ctx context.Context, uids []uuid.UUID) error {
+	if r.LockRolesFunc == nil {
+		return nil
 	}
 
-	var out []*domain.Role
-	for _, role := range r.roles {
-		if uuids != nil && !slices.Contains(uuids, role.UUID) {
-			continue
-		}
-
-		full := *role
-		full.Permissions = slices.Sorted(slices.Values(r.grants[role.ID]))
-		if countUsers {
-			ids, _ := r.ListUserIDsByRole(context.Background(), role.ID, 0)
-			full.UserCount = int64(len(ids))
-		}
-
-		out = append(out, &full)
-	}
-
-	return out, nil
+	return r.LockRolesFunc(ctx, uids)
 }
 
-func (r *fakeRepository) LockRoles(context.Context, []uuid.UUID) error {
-	if r.fails("LockRoles") {
-		return errRepo
-	}
-
-	return nil
+// UpdateRoleName answers through UpdateRoleNameFunc.
+func (r *fakeRepository) UpdateRoleName(ctx context.Context, roleID int64, name string) error {
+	return r.UpdateRoleNameFunc(ctx, roleID, name)
 }
 
-func (r *fakeRepository) UpdateRoleName(_ context.Context, roleID int64, name string) error {
-	for _, role := range r.roles {
-		if role.ID == roleID {
-			role.Name = name
-			return nil
-		}
-	}
-
-	return domain.ErrRoleNotFound
+// DeleteRole answers through DeleteRoleFunc.
+func (r *fakeRepository) DeleteRole(ctx context.Context, roleID int64) error {
+	return r.DeleteRoleFunc(ctx, roleID)
 }
 
-func (r *fakeRepository) DeleteRole(_ context.Context, roleID int64) error {
-	r.roles = slices.DeleteFunc(r.roles, func(role *domain.Role) bool { return role.ID == roleID && !role.IsSystem })
-	delete(r.grants, roleID)
-	for userID := range r.userRoles {
-		r.userRoles[userID] = slices.DeleteFunc(r.userRoles[userID], func(id int64) bool { return id == roleID })
-	}
-
-	return nil
+// ReplaceRolePermissions answers through ReplaceRolePermissionsFunc.
+func (r *fakeRepository) ReplaceRolePermissions(ctx context.Context, roleID int64, codes []string) error {
+	return r.ReplaceRolePermissionsFunc(ctx, roleID, codes)
 }
 
+// ListUserIDsByRole answers through ListUserIDsByRoleFunc.
+func (r *fakeRepository) ListUserIDsByRole(ctx context.Context, roleID int64, limit int32) ([]int64, error) {
+	return r.ListUserIDsByRoleFunc(ctx, roleID, limit)
+}
+
+// ListUserRoles answers through ListUserRolesFunc.
+func (r *fakeRepository) ListUserRoles(ctx context.Context, userID int64) ([]*domain.Role, error) {
+	return r.ListUserRolesFunc(ctx, userID)
+}
+
+// ReplaceUserRoles answers through ReplaceUserRolesFunc.
+func (r *fakeRepository) ReplaceUserRoles(ctx context.Context, userID int64, roleIDs []int64) error {
+	return r.ReplaceUserRolesFunc(ctx, userID, roleIDs)
+}
+
+// GetUserID answers through GetUserIDFunc.
+func (r *fakeRepository) GetUserID(ctx context.Context, uid uuid.UUID) (int64, error) {
+	return r.GetUserIDFunc(ctx, uid)
+}
+
+// LockUser answers through LockUserFunc.
 func (r *fakeRepository) LockUser(ctx context.Context, uid uuid.UUID) (int64, error) {
-	return r.GetUserID(ctx, uid)
+	return r.LockUserFunc(ctx, uid)
 }
 
-func (r *fakeRepository) GetUserID(_ context.Context, uid uuid.UUID) (int64, error) {
-	for id, u := range userUUIDs {
-		if u == uid {
-			return id, nil
-		}
-	}
-
-	return 0, domain.ErrUserNotFound
-}
-
-func (r *fakeRepository) ListUserRoles(_ context.Context, userID int64) ([]*domain.Role, error) {
-	if r.fails("ListUserRoles") {
-		return nil, errRepo
-	}
-
-	var out []*domain.Role
-	for _, role := range r.roles {
-		if slices.Contains(r.userRoles[userID], role.ID) {
-			out = append(out, role)
-		}
-	}
-
-	return out, nil
-}
-
-func (r *fakeRepository) ReplaceUserRoles(_ context.Context, userID int64, roleIDs []int64) error {
-	keep := slices.DeleteFunc(slices.Clone(r.userRoles[userID]), func(id int64) bool { return !r.roles[id-1].IsSystem })
-	r.userRoles[userID] = append(keep, roleIDs...)
-
-	return nil
-}
-
-func (r *fakeRepository) ReplaceRolePermissions(_ context.Context, roleID int64, codes []string) error {
-	r.grants[roleID] = slices.Clone(codes)
-	return nil
-}
-
-// ListUserIDsByRole returns every user of the role when limit is 0.
-func (r *fakeRepository) ListUserIDsByRole(_ context.Context, roleID int64, limit int32) ([]int64, error) {
-	var ids []int64
-	for userID, roles := range r.userRoles {
-		if slices.Contains(roles, roleID) && (limit == 0 || len(ids) < int(limit)) {
-			ids = append(ids, userID)
-		}
-	}
-
-	return ids, nil
-}
-
-// fakeCache records invalidations and never caches; loadErr, when set, is returned instead of
-// loading.
+// fakeCache is a domain.PermissionCache that never caches: GetOrLoad always loads, unless loadErr
+// is set. It records every invalidation.
 type fakeCache struct {
-	users   []int64
-	all     int
 	loadErr error
+
+	// users are the user IDs invalidated one by one; all counts InvalidateAll calls.
+	users []int64
+	all   int
 }
 
+// GetOrLoad returns loadErr when set, else what load returns.
 func (c *fakeCache) GetOrLoad(_ context.Context, _ int64, load func() ([]string, error)) ([]string, error) {
 	if c.loadErr != nil {
 		return nil, c.loadErr
@@ -270,32 +189,94 @@ func (c *fakeCache) GetOrLoad(_ context.Context, _ int64, load func() ([]string,
 	return load()
 }
 
+// InvalidateUsers records ids.
 func (c *fakeCache) InvalidateUsers(_ context.Context, ids ...int64) {
 	c.users = append(c.users, ids...)
 }
 
-func (c *fakeCache) InvalidateAll(context.Context) { c.all++ }
-
-// asActor returns a context whose actor holds perms, as middleware.Guard sets it, and holds them in
-// repo too (the service reloads them from the database before a change).
-func asActor(repo *fakeRepository, perms ...string) context.Context {
-	repo.actorPerms[actorID] = perms
-	return actor.With(context.Background(), &actor.Actor{UserID: actorID, UserUUID: uuid.New(), Permissions: perms})
+// InvalidateAll counts the call.
+func (c *fakeCache) InvalidateAll(context.Context) {
+	c.all++
 }
 
-// newTestService returns an AccessService over a fresh fake repository and cache.
-func newTestService() (*AccessService, *fakeRepository, *fakeCache) {
-	repo, c := newFakeRepository(), &fakeCache{}
-
-	return NewAccessService(AccessServiceParams{Repo: repo, Users: repo, Cache: c, Permissions: allPermissions}), repo, c
+// holds answers GetUserPermissions with codes: what the database grants the actor right now.
+func holds(codes ...string) func(context.Context, int64) ([]string, error) {
+	return func(context.Context, int64) ([]string, error) {
+		return codes, nil
+	}
 }
 
-// roleCodes returns the codes of roles, in order.
-func roleCodes(roles []*domain.Role) []string {
-	codes := make([]string, len(roles))
-	for i, r := range roles {
-		codes[i] = r.Code
+// actorAndTargetHold answers GetActorAndTargetPermissions with the actor's and the target's codes.
+func actorAndTargetHold(
+	actorCodes, targetCodes []string,
+) func(context.Context, int64, int64) ([]string, []string, error) {
+	return func(context.Context, int64, int64) ([]string, []string, error) {
+		return actorCodes, targetCodes, nil
+	}
+}
+
+// permissionsInDB answers ListPermissions with codes, as after the migrations that insert them.
+func permissionsInDB(codes ...string) func(context.Context) ([]domain.Permission, error) {
+	return func(context.Context) ([]domain.Permission, error) {
+		perms := make([]domain.Permission, len(codes))
+		for i, code := range codes {
+			perms[i] = domain.Permission{Code: code, Group: "group"}
+		}
+
+		return perms, nil
+	}
+}
+
+// rolesTable answers ListRoles from roles: the ones whose UUID is asked for, or all of them when
+// uids is nil, as the query does.
+func rolesTable(roles ...*domain.Role) func(context.Context, []uuid.UUID, bool) ([]*domain.Role, error) {
+	return func(_ context.Context, uids []uuid.UUID, _ bool) ([]*domain.Role, error) {
+		if uids == nil {
+			return roles, nil
+		}
+
+		var found []*domain.Role
+		for _, r := range roles {
+			if slices.Contains(uids, r.UUID) {
+				found = append(found, r)
+			}
+		}
+
+		return found, nil
+	}
+}
+
+// asActor returns a context whose actor holds perms, as middleware.Guard sets it from the cached
+// permissions. Before a change the service re-reads them from the repository (holds).
+func asActor(perms ...string) context.Context {
+	return actor.With(context.Background(), &actor.Actor{UserID: actorID, UserUUID: actorUUID, Permissions: perms})
+}
+
+// newTestService returns an AccessService built from p. A nil Users is the fake repository, a nil
+// Cache a fresh fakeCache and nil Permissions allPermissions.
+func newTestService(t *testing.T, p AccessServiceParams) *AccessService {
+	t.Helper()
+
+	if p.Users == nil {
+		p.Users = p.Repo.(*fakeRepository)
 	}
 
-	return codes
+	if p.Cache == nil {
+		p.Cache = &fakeCache{}
+	}
+
+	if p.Permissions == nil {
+		p.Permissions = allPermissions
+	}
+
+	return NewAccessService(p)
+}
+
+// wantErr fails the test unless errors.Is(got, want).
+func wantErr(t *testing.T, got, want error) {
+	t.Helper()
+
+	if !errors.Is(got, want) {
+		t.Fatalf("error = %v, want %v", got, want)
+	}
 }

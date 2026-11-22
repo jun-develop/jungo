@@ -3,9 +3,14 @@
 Every `*_test.go` file in Jungo follows the rules below (the same standard as Junkit). The goal: a
 reader understands what a file verifies without opening the production code.
 
-Tests focus on the service layer (`internal/features/<feature>/service`). Services are tested
-against hand-written in-memory fakes of their repositories and adapters; repositories (SQL) are not
-unit-tested.
+Tests focus on the service layer (`internal/features/<feature>/service`). A service test checks
+what the service decides: which repository calls it makes, how it reacts to each answer, what it
+returns, logs and invalidates. What SQL decides (which rows are kept, rotated or revoked) is not a
+service test; repositories (SQL) are not unit-tested. Adapters between features are small Go code
+and get a small test next to them (`adapter/*_test.go`).
+
+Test code is code: it follows the same conventions as the production code (README, "Conventions
+every feature follows") and the code style rules in section 7.
 
 ## 1. File layout
 
@@ -81,11 +86,46 @@ package service
 ## 6. Helpers, fakes and isolation
 
 - Extract a helper only when it removes real noise and its name says what it does.
-- Fakes are small hand-written types. No mocking frameworks.
+- Fakes are Func-field fakes: one optional `XxxFunc` field per interface method, set by the test
+  that needs it, so each test shows what its dependencies answer:
+
+  ```go
+  repo := &fakeAuthRepository{
+  	RefreshSessionFunc: func(context.Context, string, domain.NewSessionParams) (*domain.RefreshResult, error) {
+  		return &domain.RefreshResult{Status: domain.RefreshReused}, nil
+  	},
+  }
+  ```
+
+  The field is named after the method (`LockByUUID` → `LockByUUIDFunc`) and serves only that
+  method. A method whose field is nil panics when called; a test that expects a call not to happen
+  leaves the field nil. Exceptions (a lock that decides nothing the tests check) are listed in the
+  fake's doc comment. A fake never re-implements SQL or business rules.
+- Every package uses the same shapes:
+  - `newTestService(t, XxxServiceParams{...})` builds the service from the production params
+    struct; fields the test leaves zero get working defaults. Tests do not assign service fields
+    after construction. Exception: `AuthService.now`, because `AuthServiceParams` has no clock.
+  - `errDB` is the package's stand-in for a failing database; `wantErr(t, got, want)` asserts an
+    error with `errors.Is`.
+  - `asActor(...)` builds a request context carrying an actor; `new(value)` makes a pointer.
+- No mocking frameworks.
 - Clean up with `t.Cleanup`. Use `t.TempDir`, `t.Setenv`. No test depends on another test
   running first.
 
-## 7. Keeping overviews correct
+## 7. Code style (same as production)
+
+- Every type, function and method that is not a `TestXxx` has a doc comment starting with its
+  name, like production code (`// newTestService returns ...`).
+- Comments say why, in a line or two, above the code; never at the end of a line.
+- No section dividers (`// ====`) other than the overview banner. Group by order instead.
+- Code lines stay within 120 columns; wrap long calls and literals the way production code does.
+- Imports in four groups: standard library, third-party, `github.com/jun-develop/junkit/...`,
+  `jungo/...`.
+- Never drop an error with `_` without a comment saying why.
+- Build services with a plain struct literal or one constructor helper; no option-function chains
+  or pointer-to-pointer outputs.
+
+## 8. Keeping overviews correct
 
 When adding, removing or renaming a test or a table case, update the overview rows and both
 counts in the same change. `go test -v ./<pkg> -run '<TestName>'` lists the leaf runs to compare.
