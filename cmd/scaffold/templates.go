@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/jun-develop/junkit/scaffold"
@@ -25,6 +27,7 @@ func featureFiles(data scaffold.FeatureData, migrationSeq string) []scaffold.Fil
 		file(filepath.Join(dir, "repository", data.Name+"_repository.go"), repositoryTmpl),
 		file(filepath.Join(dir, "service", data.Name+"_service.go"), serviceTmpl),
 		file(filepath.Join(dir, "service", data.Name+"_service_test.go"), serviceTestTmpl),
+		file(filepath.Join(dir, "service", "fakes_test.go"), serviceFakesTmpl),
 		file(filepath.Join(dir, "dto", "v1", data.Name+"_dto.go"), dtoTmpl),
 		file(filepath.Join(dir, "handler", "v1", data.Name+"_handler.go"), handlerTmpl),
 		file(filepath.Join(dir, "router", "v1", data.Name+"_router.go"), routerTmpl),
@@ -39,18 +42,66 @@ func featureFiles(data scaffold.FeatureData, migrationSeq string) []scaffold.Fil
 //	TABLE_UPPER    "order_items" -> "ORDER_ITEMS"
 //	NAME_WORDS     "order_item"  -> "Order item" (messages)
 //	PLURAL_WORDS   "order_items" -> "order items"; PLURAL_TITLE -> "Order items"
+//
+// It also resolves {{.Pascal}} and {{.Name}} itself (text/template would render them the same), so
+// a test file's overview table can be aligned for the real names; see alignOverview.
 func fill(tmpl string, data scaffold.FeatureData) string {
 	pluralWords := strings.ReplaceAll(data.Plural, "_", " ")
 	nameWords := strings.ReplaceAll(data.Name, "_", " ")
 
-	return strings.NewReplacer(
+	return alignOverview(strings.NewReplacer(
 		"PASCAL_PLURAL", pascal(data.Plural),
 		"TABLE_UPPER", strings.ToUpper(data.Table),
 		"NAME_WORDS", capitalize(nameWords),
 		"PLURAL_WORDS", pluralWords,
 		"PLURAL_TITLE", capitalize(pluralWords),
+		"{{.Pascal}}", data.Pascal,
+		"{{.Name}}", data.Name,
 		"@@", "`",
-	).Replace(tmpl)
+	).Replace(tmpl))
+}
+
+var (
+	overviewHeader = regexp.MustCompile(`^//\s+#\s{2,}Test Case\s`)
+	overviewRow    = regexp.MustCompile(`^//\s+\d+\s{2,}\S`)
+	columnGap      = regexp.MustCompile(`\s{2,}`)
+)
+
+// alignOverview pads the columns of a test file's Test Case Overview (TESTING.md) so they line up
+// whatever the length of the feature's name. Text without such a table is returned unchanged.
+func alignOverview(text string) string {
+	lines := strings.Split(text, "\n")
+	start := slices.IndexFunc(lines, overviewHeader.MatchString)
+	if start < 0 {
+		return text
+	}
+
+	end := start + 1
+	for end < len(lines) && overviewRow.MatchString(lines[end]) {
+		end++
+	}
+
+	rows := make([][]string, 0, end-start)
+	widths := make([]int, 3)
+	for _, line := range lines[start:end] {
+		cols := columnGap.Split(strings.TrimSpace(strings.TrimPrefix(line, "//")), 4)
+		if len(cols) != 4 {
+			return text
+		}
+
+		for i := range widths {
+			widths[i] = max(widths[i], len(cols[i]))
+		}
+
+		rows = append(rows, cols)
+	}
+
+	for i, cols := range rows {
+		lines[start+i] = fmt.Sprintf("// %-*s  %-*s  %-*s  %s",
+			widths[0], cols[0], widths[1], cols[1], widths[2], cols[2], cols[3])
+	}
+
+	return strings.Join(lines, "\n")
 }
 
 // pascal converts snake_case to PascalCase ("order_items" -> "OrderItems").
@@ -465,6 +516,205 @@ func (s *{{.Pascal}}Service) Delete{{.Pascal}}(ctx context.Context, uid uuid.UUI
 
 const serviceTestTmpl = `package service
 
+// =============================================================================
+// TEST CASE OVERVIEW
+// =============================================================================
+//
+// File: {{.Name}}_service_test.go
+// Purpose: Verify that {{.Pascal}}Service hands each call to the repository and returns its answer.
+// Type: Unit (Func-field fakes)
+//
+// Test functions: 5
+// Total scenarios: 6
+//
+// #  Test Case  Scenario  Expected Result
+// 1  Test{{.Pascal}}Service_Create{{.Pascal}}_StoresInput  Valid input  Repository receives the input; its record is returned
+// 2  Test{{.Pascal}}Service_Get{{.Pascal}}_ReturnsFromRepository  Existing record  Repository asked for the UUID; its record is returned
+// 3  Test{{.Pascal}}Service_Get{{.Pascal}}_ReturnsFromRepository  Unknown UUID  Returns Err{{.Pascal}}NotFound
+// 4  Test{{.Pascal}}Service_ListPASCAL_PLURAL_PassesFilter  Search filter  Repository receives the filter; page and total returned
+// 5  Test{{.Pascal}}Service_Update{{.Pascal}}_StoresChanges  New name  Repository receives the UUID and changes; result returned
+// 6  Test{{.Pascal}}Service_Delete{{.Pascal}}_DeletesByUUID  Existing record  Repository asked to delete the UUID; returns nil
+//
+// =============================================================================
+
+import (
+	"context"
+	"testing"
+
+	"github.com/google/uuid"
+
+	"{{.Module}}/internal/features/{{.Name}}/domain"
+)
+
+func Test{{.Pascal}}Service_Create{{.Pascal}}_StoresInput(t *testing.T) {
+	input := domain.Create{{.Pascal}}Input{Name: "widget"}
+	want := &domain.{{.Pascal}}{UUID: uuid.New(), Name: "widget"}
+	var stored domain.Create{{.Pascal}}Input
+	repo := &fake{{.Pascal}}Repository{
+		CreateFunc: func(_ context.Context, in domain.Create{{.Pascal}}Input) (*domain.{{.Pascal}}, error) {
+			stored = in
+			return want, nil
+		},
+	}
+
+	got, err := New{{.Pascal}}Service(repo).Create{{.Pascal}}(context.Background(), input)
+
+	if err != nil {
+		t.Fatalf("Create{{.Pascal}}() error = %v", err)
+	}
+
+	if stored != input {
+		t.Errorf("repository received %+v, want %+v", stored, input)
+	}
+
+	if got != want {
+		t.Errorf("Create{{.Pascal}}() = %+v, want the repository's record %+v", got, want)
+	}
+}
+
+func Test{{.Pascal}}Service_Get{{.Pascal}}_ReturnsFromRepository(t *testing.T) {
+	uid := uuid.New()
+
+	t.Run("existing record", func(t *testing.T) {
+		want := &domain.{{.Pascal}}{UUID: uid}
+		var asked uuid.UUID
+		repo := &fake{{.Pascal}}Repository{
+			GetByUUIDFunc: func(_ context.Context, id uuid.UUID) (*domain.{{.Pascal}}, error) {
+				asked = id
+				return want, nil
+			},
+		}
+
+		got, err := New{{.Pascal}}Service(repo).Get{{.Pascal}}(context.Background(), uid)
+
+		if err != nil {
+			t.Fatalf("Get{{.Pascal}}() error = %v", err)
+		}
+
+		if asked != uid {
+			t.Errorf("repository asked for %v, want %v", asked, uid)
+		}
+
+		if got != want {
+			t.Errorf("Get{{.Pascal}}() = %+v, want the repository's record %+v", got, want)
+		}
+	})
+
+	t.Run("unknown uuid", func(t *testing.T) {
+		repo := &fake{{.Pascal}}Repository{
+			GetByUUIDFunc: func(context.Context, uuid.UUID) (*domain.{{.Pascal}}, error) {
+				return nil, domain.Err{{.Pascal}}NotFound
+			},
+		}
+
+		_, err := New{{.Pascal}}Service(repo).Get{{.Pascal}}(context.Background(), uid)
+
+		wantErr(t, err, domain.Err{{.Pascal}}NotFound)
+	})
+}
+
+func Test{{.Pascal}}Service_ListPASCAL_PLURAL_PassesFilter(t *testing.T) {
+	filter := domain.{{.Pascal}}ListFilter{Search: "widget", Limit: 10, SortOrder: "desc"}
+	want := &domain.{{.Pascal}}{UUID: uuid.New(), Name: "widget"}
+	var asked domain.{{.Pascal}}ListFilter
+	repo := &fake{{.Pascal}}Repository{
+		ListFunc: func(_ context.Context, f domain.{{.Pascal}}ListFilter) ([]*domain.{{.Pascal}}, int64, error) {
+			asked = f
+			return []*domain.{{.Pascal}}{want}, 1, nil
+		},
+	}
+
+	items, total, err := New{{.Pascal}}Service(repo).ListPASCAL_PLURAL(context.Background(), filter)
+
+	if err != nil {
+		t.Fatalf("ListPASCAL_PLURAL() error = %v", err)
+	}
+
+	if asked != filter {
+		t.Errorf("repository received %+v, want %+v", asked, filter)
+	}
+
+	if len(items) != 1 {
+		t.Fatalf("ListPASCAL_PLURAL() returned %d items, want 1", len(items))
+	}
+
+	if items[0] != want {
+		t.Errorf("ListPASCAL_PLURAL() item = %+v, want the repository's record %+v", items[0], want)
+	}
+
+	if total != 1 {
+		t.Errorf("ListPASCAL_PLURAL() total = %d, want 1", total)
+	}
+}
+
+func Test{{.Pascal}}Service_Update{{.Pascal}}_StoresChanges(t *testing.T) {
+	uid := uuid.New()
+	input := domain.Update{{.Pascal}}Input{Name: new("renamed")}
+	want := &domain.{{.Pascal}}{UUID: uid, Name: "renamed"}
+	var (
+		askedUID   uuid.UUID
+		askedInput domain.Update{{.Pascal}}Input
+	)
+	repo := &fake{{.Pascal}}Repository{
+		UpdateFunc: func(_ context.Context, id uuid.UUID, in domain.Update{{.Pascal}}Input) (*domain.{{.Pascal}}, error) {
+			askedUID, askedInput = id, in
+			return want, nil
+		},
+	}
+
+	got, err := New{{.Pascal}}Service(repo).Update{{.Pascal}}(context.Background(), uid, input)
+
+	if err != nil {
+		t.Fatalf("Update{{.Pascal}}() error = %v", err)
+	}
+
+	if askedUID != uid {
+		t.Errorf("repository updated %v, want %v", askedUID, uid)
+	}
+
+	if askedInput != input {
+		t.Errorf("repository received %+v, want %+v", askedInput, input)
+	}
+
+	if got != want {
+		t.Errorf("Update{{.Pascal}}() = %+v, want the repository's record %+v", got, want)
+	}
+}
+
+func Test{{.Pascal}}Service_Delete{{.Pascal}}_DeletesByUUID(t *testing.T) {
+	uid := uuid.New()
+	var asked uuid.UUID
+	repo := &fake{{.Pascal}}Repository{
+		DeleteFunc: func(_ context.Context, id uuid.UUID) error {
+			asked = id
+			return nil
+		},
+	}
+
+	err := New{{.Pascal}}Service(repo).Delete{{.Pascal}}(context.Background(), uid)
+
+	if err != nil {
+		t.Fatalf("Delete{{.Pascal}}() error = %v", err)
+	}
+
+	if asked != uid {
+		t.Errorf("repository deleted %v, want %v", asked, uid)
+	}
+}
+`
+
+const serviceFakesTmpl = `package service
+
+// =============================================================================
+// TEST HELPERS (no test scenarios)
+// =============================================================================
+//
+// File: fakes_test.go
+// Purpose: Func-field fake of {{.Pascal}}Service's repository, and the wantErr assertion.
+// Used by: {{.Name}}_service_test.go
+//
+// =============================================================================
+
 import (
 	"context"
 	"errors"
@@ -475,8 +725,8 @@ import (
 	"{{.Module}}/internal/features/{{.Name}}/domain"
 )
 
-// fake{{.Pascal}}Repository is a test double for domain.{{.Pascal}}Repository; calling an unset
-// Func panics.
+// fake{{.Pascal}}Repository is a domain.{{.Pascal}}Repository whose answers each test sets through the
+// Func fields. Calling a method whose Func is nil panics, so a test sets exactly the calls it expects.
 type fake{{.Pascal}}Repository struct {
 	CreateFunc    func(ctx context.Context, input domain.Create{{.Pascal}}Input) (*domain.{{.Pascal}}, error)
 	GetByUUIDFunc func(ctx context.Context, uid uuid.UUID) (*domain.{{.Pascal}}, error)
@@ -485,123 +735,52 @@ type fake{{.Pascal}}Repository struct {
 	DeleteFunc    func(ctx context.Context, uid uuid.UUID) error
 }
 
+// WithTransaction runs fn directly: the fake has nothing to commit or roll back.
 func (f *fake{{.Pascal}}Repository) WithTransaction(ctx context.Context, fn func(ctx context.Context) error) error {
 	return fn(ctx)
 }
 
-func (f *fake{{.Pascal}}Repository) Create(ctx context.Context, input domain.Create{{.Pascal}}Input) (*domain.{{.Pascal}}, error) {
+// Create answers through CreateFunc.
+func (f *fake{{.Pascal}}Repository) Create(
+	ctx context.Context,
+	input domain.Create{{.Pascal}}Input,
+) (*domain.{{.Pascal}}, error) {
 	return f.CreateFunc(ctx, input)
 }
 
+// GetByUUID answers through GetByUUIDFunc.
 func (f *fake{{.Pascal}}Repository) GetByUUID(ctx context.Context, uid uuid.UUID) (*domain.{{.Pascal}}, error) {
 	return f.GetByUUIDFunc(ctx, uid)
 }
 
-func (f *fake{{.Pascal}}Repository) List(ctx context.Context, filter domain.{{.Pascal}}ListFilter) ([]*domain.{{.Pascal}}, int64, error) {
+// List answers through ListFunc.
+func (f *fake{{.Pascal}}Repository) List(
+	ctx context.Context,
+	filter domain.{{.Pascal}}ListFilter,
+) ([]*domain.{{.Pascal}}, int64, error) {
 	return f.ListFunc(ctx, filter)
 }
 
-func (f *fake{{.Pascal}}Repository) Update(ctx context.Context, uid uuid.UUID, input domain.Update{{.Pascal}}Input) (*domain.{{.Pascal}}, error) {
+// Update answers through UpdateFunc.
+func (f *fake{{.Pascal}}Repository) Update(
+	ctx context.Context,
+	uid uuid.UUID,
+	input domain.Update{{.Pascal}}Input,
+) (*domain.{{.Pascal}}, error) {
 	return f.UpdateFunc(ctx, uid, input)
 }
 
+// Delete answers through DeleteFunc.
 func (f *fake{{.Pascal}}Repository) Delete(ctx context.Context, uid uuid.UUID) error {
 	return f.DeleteFunc(ctx, uid)
 }
 
-func Test{{.Pascal}}Service_Create{{.Pascal}}(t *testing.T) {
-	want := &domain.{{.Pascal}}{Name: "widget"}
-	repo := &fake{{.Pascal}}Repository{
-		CreateFunc: func(context.Context, domain.Create{{.Pascal}}Input) (*domain.{{.Pascal}}, error) {
-			return want, nil
-		},
-	}
+// wantErr fails the test unless errors.Is(got, want).
+func wantErr(t *testing.T, got, want error) {
+	t.Helper()
 
-	got, err := New{{.Pascal}}Service(repo).Create{{.Pascal}}(context.Background(), domain.Create{{.Pascal}}Input{Name: "widget"})
-	if err != nil {
-		t.Fatalf("Create{{.Pascal}}() error = %v, want nil", err)
-	}
-
-	if got != want {
-		t.Errorf("Create{{.Pascal}}() = %v, want %v", got, want)
-	}
-}
-
-func Test{{.Pascal}}Service_Get{{.Pascal}}(t *testing.T) {
-	uid := uuid.New()
-
-	t.Run("returns the {{.Name}}", func(t *testing.T) {
-		want := &domain.{{.Pascal}}{UUID: uid}
-		repo := &fake{{.Pascal}}Repository{
-			GetByUUIDFunc: func(_ context.Context, got uuid.UUID) (*domain.{{.Pascal}}, error) {
-				if got != uid {
-					t.Errorf("GetByUUID called with %v, want %v", got, uid)
-				}
-
-				return want, nil
-			},
-		}
-
-		got, err := New{{.Pascal}}Service(repo).Get{{.Pascal}}(context.Background(), uid)
-		if err != nil {
-			t.Fatalf("Get{{.Pascal}}() error = %v, want nil", err)
-		}
-
-		if got != want {
-			t.Errorf("Get{{.Pascal}}() = %v, want %v", got, want)
-		}
-	})
-
-	t.Run("propagates a repository error", func(t *testing.T) {
-		repo := &fake{{.Pascal}}Repository{
-			GetByUUIDFunc: func(context.Context, uuid.UUID) (*domain.{{.Pascal}}, error) {
-				return nil, domain.Err{{.Pascal}}NotFound
-			},
-		}
-
-		_, err := New{{.Pascal}}Service(repo).Get{{.Pascal}}(context.Background(), uid)
-		if !errors.Is(err, domain.Err{{.Pascal}}NotFound) {
-			t.Fatalf("Get{{.Pascal}}() error = %v, want %v", err, domain.Err{{.Pascal}}NotFound)
-		}
-	})
-}
-
-func Test{{.Pascal}}Service_ListPASCAL_PLURAL(t *testing.T) {
-	filter := domain.{{.Pascal}}ListFilter{Search: "widget", Limit: 10, SortOrder: "desc"}
-	repo := &fake{{.Pascal}}Repository{
-		ListFunc: func(_ context.Context, got domain.{{.Pascal}}ListFilter) ([]*domain.{{.Pascal}}, int64, error) {
-			if got != filter {
-				t.Errorf("List called with %+v, want %+v", got, filter)
-			}
-
-			return []*domain.{{.Pascal}}{ {Name: "widget"} }, 1, nil
-		},
-	}
-
-	items, total, err := New{{.Pascal}}Service(repo).ListPASCAL_PLURAL(context.Background(), filter)
-	if err != nil {
-		t.Fatalf("ListPASCAL_PLURAL() error = %v, want nil", err)
-	}
-
-	if total != 1 || len(items) != 1 {
-		t.Errorf("ListPASCAL_PLURAL() = (%v, %d), want (1 item, 1)", items, total)
-	}
-}
-
-func Test{{.Pascal}}Service_Delete{{.Pascal}}(t *testing.T) {
-	uid := uuid.New()
-	repo := &fake{{.Pascal}}Repository{
-		DeleteFunc: func(_ context.Context, got uuid.UUID) error {
-			if got != uid {
-				t.Errorf("Delete called with %v, want %v", got, uid)
-			}
-
-			return nil
-		},
-	}
-
-	if err := New{{.Pascal}}Service(repo).Delete{{.Pascal}}(context.Background(), uid); err != nil {
-		t.Fatalf("Delete{{.Pascal}}() error = %v, want nil", err)
+	if !errors.Is(got, want) {
+		t.Fatalf("error = %v, want %v", got, want)
 	}
 }
 `
