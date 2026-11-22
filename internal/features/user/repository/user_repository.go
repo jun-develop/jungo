@@ -189,4 +189,4 @@ func mapUser(row sqlc.User) *domain.User {
 }
 
 // wrap adds the failed operation to err; domain errors stay matchable with errors.Is/As.
-var wrap = database.Wrapper("user repository")
+var wrap = database.ErrorPrefixer("user repository")

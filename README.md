@@ -851,7 +851,7 @@ them, and review checks them.
   join it. Invalidate caches after the commit, never inside. Login and refresh, which must lock and
   decide in one round trip, are PL/pgSQL functions (`database/primary/functions/`).
 - **Errors**: repositories wrap database errors as `"<feature> repository: <operation>: %w"` via
-  `var wrap = database.Wrapper("<feature> repository")` (junkit);
+  `var wrap = database.ErrorPrefixer("<feature> repository")` (junkit);
   domain errors stay matchable with `errors.Is/As`. Log an error in one place only, and never drop
   one with `_ =` without a comment saying why.
 - **Fx**: constructors are `NewXxx(...) *Xxx`, bound to interfaces with `fx.As`. Up to four
@@ -866,7 +866,8 @@ them, and review checks them.
 - **Comments** say why, in a line or two, above the code (never at the end of a line). A comment
   that names a file or a test must stay true.
 - **Tests**: service tests use Func-field fakes (`CreateFunc`, ...) and `t.Run` cases, named
-  `Test<Type>_<Method>[_<Behaviour>]`. A stateful fake is for flows the database decides (auth).
+  `Test<Type>_<Method>[_<Behaviour>]`. A fake never re-implements SQL: what the database decides
+  (login and refresh in PL/pgSQL, token cleanup) is not covered by service tests. See `TESTING.md`.
 - **Migrations**: `NNNNNN_<what>.up.sql` with a matching `.down.sql`; permissions are inserted by
   migrations, never seeders; seeders hold development demo data only. Tables use the shared
   `f_set_updated_at()` trigger.

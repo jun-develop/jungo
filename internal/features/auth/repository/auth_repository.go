@@ -270,7 +270,7 @@ func parseIP(ip *string) *netip.Addr {
 }
 
 // wrap adds the failed operation to err; domain errors stay matchable with errors.Is/As.
-var wrap = database.Wrapper("auth repository")
+var wrap = database.ErrorPrefixer("auth repository")
 
 // formatIP converts an INET column value back to a string.
 func formatIP(addr *netip.Addr) *string {

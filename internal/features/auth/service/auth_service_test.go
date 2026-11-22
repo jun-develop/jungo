@@ -1,5 +1,88 @@
 package service
 
+// =============================================================================
+// TEST CASE OVERVIEW
+// =============================================================================
+//
+// File: auth_service_test.go
+// Purpose: Verify what AuthService decides for login, token authentication, refresh, logout,
+//          session listing, the internal token endpoints and token cleanup.
+// Type: Unit (Func-field repository; real sealer, hasher, session cache and login guard)
+//
+// Test functions: 37
+// Total scenarios: 67
+//
+// #   Test Case                                                               Scenario                                   Expected Result
+// 1   TestAuthService_Login_IssuesSealedTokensAndStoresOnlyHashes             Successful login                           Sealed tokens returned; only their hashes and expiries stored
+// 2   TestAuthService_Login_TrimsClientMetadata                               Values with spaces                         Stored trimmed
+// 3   TestAuthService_Login_TrimsClientMetadata                               Long user agent and device ID              Truncated to 512 and 100 characters
+// 4   TestAuthService_Login_TrimsClientMetadata                               Empty values                               Stored as nil
+// 5   TestAuthService_Login_InvalidatesReplacedSession                        Repository reports a replaced session      That session leaves the cache; others stay
+// 6   TestAuthService_Login_RejectsInvalidCredentialsTheSameWay               Wrong password                             ErrInvalidCredentials
+// 7   TestAuthService_Login_RejectsInvalidCredentialsTheSameWay               Unknown email                              ErrInvalidCredentials
+// 8   TestAuthService_Login_ChecksStatusOnlyAfterPassword                     Inactive user, wrong password              ErrInvalidCredentials
+// 9   TestAuthService_Login_ChecksStatusOnlyAfterPassword                     Inactive user, right password              ErrUserInactive
+// 10  TestAuthService_Login_ReturnsRepositoryError                            User lookup fails                          Returns the database error
+// 11  TestAuthService_Login_ReturnsRepositoryError                            Session cannot be stored                   Returns the database error
+// 12  TestAuthService_Login_BruteForceWarnsThenBlocks                         5 wrong passwords, then the right one      Warning from the 3rd failure; then ErrTooManyAttempts
+// 13  TestAuthService_Login_ConcurrentAttemptsCannotExceedLimit               20 concurrent wrong passwords              Exactly 5 reach the password check
+// 14  TestAuthService_Login_SuccessClearsShortWindow                          4 failures, success, then a failure        Plain ErrInvalidCredentials (counter restarted)
+// 15  TestAuthService_Login_FailuresElsewhereCannotLockTheOwnerOut            20 failures from other IPs                 Owner still logs in from their own IP
+// 16  TestAuthService_Login_RecaptchaIsOptional                               Enabled, no verifier wired                 Login works
+// 17  TestAuthService_Login_RecaptchaIsOptional                               Enabled, verifier fails                    ErrRecaptchaFailed
+// 18  TestAuthService_Login_RecaptchaIsOptional                               Disabled, failing verifier wired           Login works (verifier not called)
+// 19  TestAuthService_AuthenticateAccess_ReturnsIdentityOfSession             Access token of a live session             Identity built from the session
+// 20  TestAuthService_AuthenticateAccess_ChecksSessionState                   Refresh token instead of access token      ErrInvalidTokenType
+// 21  TestAuthService_AuthenticateAccess_ChecksSessionState                   User inactive                              ErrUserInactive
+// 22  TestAuthService_AuthenticateAccess_ChecksSessionState                   User inactive and token revoked            ErrUserInactive (status checked first)
+// 23  TestAuthService_AuthenticateAccess_ChecksSessionState                   Access token superseded                    ErrTokenRevoked
+// 24  TestAuthService_AuthenticateAccess_ChecksSessionState                   Access token revoked                       ErrTokenRevoked
+// 25  TestAuthService_AuthenticateAccess_ChecksSessionState                   Access token expired                       ErrTokenExpired
+// 26  TestAuthService_AuthenticateAccess_RejectsUnknownTokens                 Raw unsealed token                         ErrInvalidToken
+// 27  TestAuthService_AuthenticateAccess_RejectsUnknownTokens                 Stored token hash                          ErrInvalidToken
+// 28  TestAuthService_AuthenticateAccess_RejectsUnknownTokens                 Sealed token the repository does not know  ErrInvalidToken
+// 29  TestAuthService_AuthenticateAccess_ReturnsRepositoryError               Database fails                             The database error, not ErrInvalidToken
+// 30  TestAuthService_AuthenticateAccess_ChecksExpiryOnCacheHit               Cached session, 16 minutes later           ErrTokenExpired without reloading
+// 31  TestAuthService_AuthenticateAccess_ReloadsSessionAfterUserInvalidation  User's cache entries invalidated           Session reloaded; ErrUserInactive
+// 32  TestAuthService_Logout_RevokesFamilyAndInvalidatesCache                 Logout of a cached session                 Family revoked as logout; session leaves the cache
+// 33  TestAuthService_Logout_ReturnsRepositoryError                           Database fails                             Returns the database error
+// 34  TestAuthService_LogoutAll_RevokesEverySessionOfUser                     Two cached sessions                        User's sessions revoked as logout; both leave the cache
+// 35  TestAuthService_LogoutAll_ReturnsRepositoryError                        Database fails                             Returns the database error
+// 36  TestAuthService_Refresh_ExchangesRefreshTokenForNewPair                 Valid refresh token                        New pair's hashes, metadata, expiries and nil device ID sent
+// 37  TestAuthService_Refresh_MapsRefreshStatus                               Status rotated                             New pair; session leaves the cache
+// 38  TestAuthService_Refresh_MapsRefreshStatus                               Status reused                              ErrTokenReused; session leaves the cache
+// 39  TestAuthService_Refresh_MapsRefreshStatus                               Status not_found                           ErrInvalidToken
+// 40  TestAuthService_Refresh_MapsRefreshStatus                               Status invalid_type                        ErrInvalidTokenType
+// 41  TestAuthService_Refresh_MapsRefreshStatus                               Status user_inactive                       ErrUserInactive
+// 42  TestAuthService_Refresh_MapsRefreshStatus                               Status revoked                             ErrTokenRevoked
+// 43  TestAuthService_Refresh_MapsRefreshStatus                               Status expired                             ErrTokenExpired
+// 44  TestAuthService_Refresh_LogsReuse                                       Status reused                              Warning logged with family_uuid and user_uuid
+// 45  TestAuthService_Refresh_RejectsUnknownStatus                            Status the service does not know           Returns an unknown refresh status error
+// 46  TestAuthService_Refresh_RejectsUnsealedToken                            Not a sealed token                         ErrInvalidToken
+// 47  TestAuthService_Refresh_ReturnsRepositoryError                          Database fails                             Returns the database error
+// 48  TestAuthService_ListSessions_FlagsCurrent                               Two sessions of the user                   Only the caller's session is flagged current
+// 49  TestAuthService_ListSessions_ReturnsRepositoryError                     Database fails                             Returns the database error
+// 50  TestAuthService_GetTokenDetails_ReportsTypeAndStatus                    Refresh token of a live session            refresh_token, active
+// 51  TestAuthService_GetTokenDetails_ReportsTypeAndStatus                    Access token of a live session             access_token, active
+// 52  TestAuthService_GetTokenDetails_ReportsTypeAndStatus                    Access token superseded                    access_token, revoked
+// 53  TestAuthService_GetTokenDetails_ReportsTypeAndStatus                    Expired access token                       access_token, expired
+// 54  TestAuthService_GetTokenDetails_RejectsInvalidTokens                    Not a sealed token                         ErrInvalidToken
+// 55  TestAuthService_GetTokenDetails_RejectsInvalidTokens                    Sealed token the repository does not know  ErrTokenNotFound
+// 56  TestAuthService_GetTokenDetails_RejectsInvalidTokens                    Database fails                             Returns the database error
+// 57  TestAuthService_RevokeToken_RevokesTheTokensSession                     Valid sealed token                         Its family revoked as admin; session leaves the cache
+// 58  TestAuthService_RevokeToken_RejectsInvalidTokens                        Not a sealed token                         ErrInvalidToken
+// 59  TestAuthService_RevokeToken_RejectsInvalidTokens                        Sealed token the repository does not know  ErrTokenNotFound
+// 60  TestAuthService_RevokeToken_RejectsInvalidTokens                        Database fails                             Returns the database error
+// 61  TestAuthService_RevokeAllTokens_RevokesEverySessionOfUser               Valid sealed token                         User's sessions revoked as admin; all leave the cache
+// 62  TestAuthService_RevokeAllTokens_RejectsInvalidTokens                    Not a sealed token                         ErrInvalidToken
+// 63  TestAuthService_RevokeAllTokens_RejectsInvalidTokens                    Sealed token the repository does not know  ErrTokenNotFound
+// 64  TestAuthService_RevokeAllTokens_RejectsInvalidTokens                    Database fails                             Returns the database error
+// 65  TestAuthService_CleanupTokens_PassesRetentionCutoff                     7-day retention                            Repository gets now minus 7 days; its count returned
+// 66  TestWaitOrTimeout_WaitsForBackgroundWork                                Background work finishes                   Returns nil
+// 67  TestWaitOrTimeout_WaitsForBackgroundWork                                Stop deadline ends first                   Returns context.Canceled
+//
+// =============================================================================
+
 import (
 	"context"
 	"errors"
@@ -10,562 +93,98 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"go.uber.org/fx/fxtest"
 	"go.uber.org/zap"
-	"golang.org/x/crypto/bcrypt"
+	"go.uber.org/zap/zaptest/observer"
 
-	"github.com/jun-develop/junkit/cache"
 	"github.com/jun-develop/junkit/security"
 
-	"jungo/internal/config"
 	"jungo/internal/features/auth/domain"
-	"jungo/internal/features/auth/infrastructure"
-	useradapter "jungo/internal/features/user/adapter"
 )
 
-const testPassword = "correct-horse-battery"
+// fakeVerifier is a recaptcha.Verifier that always returns err.
+type fakeVerifier struct{ err error }
 
-// =============================================================================
-// Fake repository
-// =============================================================================
+// Verify returns f.err.
+func (f fakeVerifier) Verify(context.Context, string, string) error { return f.err }
 
-// fakeUser is a row of the fake users table.
-type fakeUser struct {
-	id           int64
-	uuid         uuid.UUID
-	email        string
-	passwordHash string
-	active       bool
-	deleted      bool
+// loginRepository returns a repository that accepts every new login session.
+func loginRepository() *fakeAuthRepository {
+	return recordingLoginRepository(&domain.NewSessionParams{})
 }
 
-// fakeToken is a row of the fake auth_tokens table.
-type fakeToken struct {
-	id        int64
-	uuid      uuid.UUID
-	userID    int64
-	family    uuid.UUID
-	typ       domain.TokenType
-	hash      string
-	expiresAt time.Time
-	revokedAt *time.Time
-	reason    *string
-	ip, ua    *string
-	deviceID  *string
-	createdAt time.Time
-	updatedAt *time.Time
-}
-
-// fakeRepository is an in-memory AuthRepository and UserProvider mirroring the SQL.
-type fakeRepository struct {
-	mu     sync.Mutex
-	now    func() time.Time
-	users  map[int64]*fakeUser
-	tokens []*fakeToken
-	resets []*fakeReset
-	nextID int64
-}
-
-// fakeReset is a row of the fake password_reset_tokens table.
-type fakeReset struct {
-	userID    int64
-	hash      string
-	expiresAt time.Time
-	used      bool
-}
-
-func newFakeRepository(now func() time.Time) *fakeRepository {
-	return &fakeRepository{now: now, users: map[int64]*fakeUser{}}
-}
-
-func (r *fakeRepository) addUser(u *fakeUser) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.users[u.id] = u
-}
-
-// GetCredentialsByEmail implements domain.UserProvider.
-func (r *fakeRepository) GetCredentialsByEmail(_ context.Context, email string) (*domain.Credentials, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	for _, u := range r.users {
-		if u.email == email && !u.deleted {
-			return &domain.Credentials{UserID: u.id, UserUUID: u.uuid, Email: u.email, FirstName: "Jane", LastName: "Doe", PasswordHash: u.passwordHash, Active: u.active}, nil
-		}
-	}
-
-	return nil, domain.ErrUserNotFound
-}
-
-// SetPasswordHash implements domain.UserProvider.
-func (r *fakeRepository) SetPasswordHash(_ context.Context, userID int64, passwordHash string) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	u, ok := r.users[userID]
-	if !ok || u.deleted {
-		return domain.ErrUserNotFound
-	}
-
-	u.passwordHash = passwordHash
-
-	return nil
-}
-
-// WithTransaction runs fn directly: the fake has no rollback.
-func (r *fakeRepository) WithTransaction(ctx context.Context, fn func(ctx context.Context) error) error {
-	return fn(ctx)
-}
-
-func (r *fakeRepository) CreatePasswordResetToken(_ context.Context, userID int64, hash string, expiresAt time.Time) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	for _, rt := range r.resets {
-		if rt.userID == userID {
-			rt.used = true
-		}
-	}
-
-	r.resets = append(r.resets, &fakeReset{userID: userID, hash: hash, expiresAt: expiresAt})
-
-	return nil
-}
-
-func (r *fakeRepository) ConsumePasswordResetToken(_ context.Context, hash string) (*domain.PasswordResetOwner, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	for _, rt := range r.resets {
-		u := r.users[rt.userID]
-		if rt.hash == hash && !rt.used && r.now().Before(rt.expiresAt) && u.active && !u.deleted {
-			rt.used = true
-			return &domain.PasswordResetOwner{UserID: u.id, UserUUID: u.uuid}, nil
-		}
-	}
-
-	return nil, domain.ErrInvalidResetToken
-}
-
-func (r *fakeRepository) CreateLoginSession(_ context.Context, p domain.NewSessionParams) (*domain.LoginSessionResult, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	now := r.now()
-
-	var existing uuid.UUID
-	for i := len(r.tokens) - 1; i >= 0; i-- {
-		t := r.tokens[i]
-		if t.userID != p.UserID || t.revokedAt != nil || !now.Before(t.expiresAt) {
-			continue
-		}
-
-		byDevice := p.DeviceID != nil && t.deviceID != nil && *t.deviceID == *p.DeviceID
-		byClient := p.DeviceID == nil && t.deviceID == nil && sameClient(t.ip, p.IPAddress) && eqPtr(t.ua, p.UserAgent)
-		if byDevice || byClient {
-			existing = t.family
-			break
-		}
-	}
-
-	if existing != uuid.Nil {
-		r.revokeFamilyLocked(existing, "rotated")
-		p.FamilyUUID = existing
-		r.insertPairLocked(p)
-
-		return &domain.LoginSessionResult{FamilyUUID: existing, StaleFamilyUUID: existing}, nil
-	}
-
-	r.insertPairLocked(p)
-
-	return &domain.LoginSessionResult{FamilyUUID: p.FamilyUUID}, nil
-}
-
-// RefreshSession mirrors f_auth_refresh_session.
-func (r *fakeRepository) RefreshSession(_ context.Context, hash string, p domain.NewSessionParams) (*domain.RefreshResult, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	t := r.byHash(hash)
-	if t == nil || r.users[t.userID] == nil || r.users[t.userID].deleted {
-		return &domain.RefreshResult{Status: domain.RefreshNotFound}, nil
-	}
-
-	u := r.users[t.userID]
-	result := &domain.RefreshResult{FamilyUUID: t.family, UserUUID: u.uuid}
-
-	switch {
-	case t.typ != domain.TokenTypeRefresh:
-		result.Status = domain.RefreshInvalidType
-	case !u.active:
-		result.Status = domain.RefreshUserInactive
-	case exchanged(t) && t.revokedAt.After(r.now().Add(-reuseGrace)):
-		result.Status = domain.RefreshRevoked
-	case exchanged(t):
-		r.revokeFamilyLocked(t.family, domain.RevokedReasonReuse)
-		result.Status = domain.RefreshReused
-	case t.revokedAt != nil:
-		result.Status = domain.RefreshRevoked
-	case !r.now().Before(t.expiresAt):
-		result.Status = domain.RefreshExpired
-	default:
-		r.revokeFamilyLocked(t.family, domain.RevokedReasonRefresh)
-
-		p.UserID, p.FamilyUUID = t.userID, t.family
-		if p.DeviceID == nil {
-			p.DeviceID = t.deviceID
-		}
-
-		r.insertPairLocked(p)
-		result.Status = domain.RefreshRotated
-	}
-
-	return result, nil
-}
-
-func (r *fakeRepository) GetSessionByHash(_ context.Context, hash string) (*domain.Session, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	tok := r.byHash(hash)
-	if tok == nil {
-		return nil, domain.ErrTokenNotFound
-	}
-
-	u := r.users[tok.userID]
-	if u == nil || u.deleted {
-		return nil, domain.ErrTokenNotFound
-	}
-
-	var access, refresh *fakeToken
-	created := tok.createdAt
-	for _, t := range r.tokens {
-		if t.family != tok.family {
-			continue
-		}
-
-		if t.createdAt.Before(created) {
-			created = t.createdAt
-		}
-
-		if t.typ == domain.TokenTypeAccess {
-			access = t
-		} else {
-			refresh = t
-		}
-	}
-
-	return &domain.Session{
-		UserID: u.id, UserUUID: u.uuid, Email: u.email, UserActive: u.active,
-		FamilyUUID: tok.family, IPAddress: refresh.ip, UserAgent: refresh.ua, DeviceID: refresh.deviceID,
-		CreatedAt: created,
-		Access:    domain.TokenState{UUID: access.uuid, Hash: access.hash, ExpiresAt: access.expiresAt, RevokedAt: access.revokedAt},
-		Refresh:   domain.TokenState{UUID: refresh.uuid, Hash: refresh.hash, ExpiresAt: refresh.expiresAt, RevokedAt: refresh.revokedAt},
-	}, nil
-}
-
-func (r *fakeRepository) GetTokenTypeByHash(_ context.Context, hash string) (domain.TokenType, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	t := r.byHash(hash)
-	if t == nil || r.users[t.userID] == nil || r.users[t.userID].deleted {
-		return 0, domain.ErrTokenNotFound
-	}
-
-	return t.typ, nil
-}
-
-func (r *fakeRepository) RevokeFamily(_ context.Context, family uuid.UUID, reason string) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.revokeFamilyLocked(family, reason)
-
-	return nil
-}
-
-func (r *fakeRepository) RevokeFamilyByHash(_ context.Context, hash, reason string) (uuid.UUID, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	t := r.byHash(hash)
-	if t == nil || r.users[t.userID] == nil || r.users[t.userID].deleted {
-		return uuid.Nil, domain.ErrTokenNotFound
-	}
-
-	r.revokeFamilyLocked(t.family, reason)
-
-	return t.family, nil
-}
-
-func (r *fakeRepository) RevokeAllByHash(ctx context.Context, hash, reason string) ([]uuid.UUID, error) {
-	r.mu.Lock()
-	t := r.byHash(hash)
-	if t == nil || r.users[t.userID] == nil || r.users[t.userID].deleted {
-		r.mu.Unlock()
-		return nil, domain.ErrTokenNotFound
-	}
-
-	userUUID := r.users[t.userID].uuid
-	r.mu.Unlock()
-
-	return r.RevokeAllForUser(ctx, userUUID, reason)
-}
-
-func (r *fakeRepository) RevokeAllForUser(_ context.Context, userUUID uuid.UUID, reason string) ([]uuid.UUID, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	seen := map[uuid.UUID]bool{}
-	var families []uuid.UUID
-	for _, t := range r.tokens {
-		if u := r.users[t.userID]; u != nil && u.uuid == userUUID && t.revokedAt == nil {
-			if !seen[t.family] {
-				seen[t.family] = true
-				families = append(families, t.family)
-			}
-		}
-	}
-
-	for _, f := range families {
-		r.revokeFamilyLocked(f, reason)
-	}
-
-	return families, nil
-}
-
-func (r *fakeRepository) ListActiveSessions(_ context.Context, userID int64) ([]*domain.SessionSummary, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	var items []*domain.SessionSummary
-	for _, t := range r.tokens {
-		if t.userID == userID && t.typ == domain.TokenTypeRefresh && t.revokedAt == nil && r.now().Before(t.expiresAt) {
-			items = append(items, &domain.SessionSummary{FamilyUUID: t.family, IPAddress: t.ip, UserAgent: t.ua, DeviceID: t.deviceID, CreatedAt: t.createdAt, ExpiresAt: t.expiresAt})
-		}
-	}
-
-	return items, nil
-}
-
-func (r *fakeRepository) CleanupTokens(_ context.Context, before time.Time) (int64, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	// A live family keeps its first row and its latest access token.
-	now := r.now()
-	live, first, lastAccess := map[uuid.UUID]bool{}, map[uuid.UUID]*fakeToken{}, map[uuid.UUID]*fakeToken{}
-	for _, t := range r.tokens {
-		if t.revokedAt == nil && now.Before(t.expiresAt) {
-			live[t.family] = true
-		}
-
-		if first[t.family] == nil {
-			first[t.family] = t
-		}
-
-		if t.typ == domain.TokenTypeAccess {
-			lastAccess[t.family] = t
-		}
-	}
-
-	kept := r.tokens[:0]
-	var deleted int64
-	for _, t := range r.tokens {
-		// An exchanged refresh token stays until it would have expired, so its reuse is detected.
-		protected := live[t.family] && (t == first[t.family] || t == lastAccess[t.family]) ||
-			t.typ == domain.TokenTypeRefresh && exchanged(t) && now.Before(t.expiresAt)
-		if !protected && (t.expiresAt.Before(before) || (t.revokedAt != nil && t.revokedAt.Before(before))) {
-			deleted++
-			continue
-		}
-
-		kept = append(kept, t)
-	}
-
-	r.tokens = kept
-
-	return deleted, nil
-}
-
-// activeFamilyCount returns how many non-revoked tokens the family has.
-func (r *fakeRepository) activeFamilyCount(family uuid.UUID) int {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	return len(r.activeInFamily(family))
-}
-
-func (r *fakeRepository) activeInFamily(family uuid.UUID) []*fakeToken {
-	var active []*fakeToken
-	for _, t := range r.tokens {
-		if t.family == family && t.revokedAt == nil {
-			active = append(active, t)
-		}
-	}
-
-	return active
-}
-
-func (r *fakeRepository) revokeFamilyLocked(family uuid.UUID, reason string) {
-	now := r.now()
-	for _, t := range r.tokens {
-		if t.family == family && t.revokedAt == nil {
-			t.revokedAt, t.reason = &now, &reason
-		}
+// recordingLoginRepository returns a repository that accepts every new login session and stores
+// the params of the last one in got.
+func recordingLoginRepository(got *domain.NewSessionParams) *fakeAuthRepository {
+	return &fakeAuthRepository{
+		CreateLoginSessionFunc: func(_ context.Context, p domain.NewSessionParams) (*domain.LoginSessionResult, error) {
+			*got = p
+			return &domain.LoginSessionResult{FamilyUUID: p.FamilyUUID}, nil
+		},
 	}
 }
 
-func (r *fakeRepository) insertPairLocked(p domain.NewSessionParams) {
-	now := r.now()
-	for _, tt := range []struct {
-		typ     domain.TokenType
-		hash    string
-		expires time.Time
-	}{
-		{domain.TokenTypeAccess, p.AccessHash, p.AccessExpiresAt},
-		{domain.TokenTypeRefresh, p.RefreshHash, p.RefreshExpiresAt},
-	} {
-		r.nextID++
-		r.tokens = append(r.tokens, &fakeToken{
-			id: r.nextID, uuid: uuid.New(), userID: p.UserID, family: p.FamilyUUID, typ: tt.typ,
-			hash: tt.hash, expiresAt: tt.expires, ip: p.IPAddress, ua: p.UserAgent, deviceID: p.DeviceID, createdAt: now,
-		})
+// refreshAnswers returns a RefreshSessionFunc that always answers result and err.
+func refreshAnswers(
+	result *domain.RefreshResult,
+	err error,
+) func(context.Context, string, domain.NewSessionParams) (*domain.RefreshResult, error) {
+	return func(context.Context, string, domain.NewSessionParams) (*domain.RefreshResult, error) {
+		return result, err
 	}
 }
 
-func (r *fakeRepository) byHash(hash string) *fakeToken {
-	for _, t := range r.tokens {
-		if t.hash == hash {
-			return t
-		}
+// deref returns *p, or "<nil>" when p is nil, so optional strings compare and print alike.
+func deref(p *string) string {
+	if p == nil {
+		return "<nil>"
 	}
 
-	return nil
+	return *p
 }
 
-// reuseGrace mirrors f_auth_refresh_session's v_reuse_grace.
-const reuseGrace = 10 * time.Second
-
-// exchanged reports whether t was retired by a refresh or a re-login (its reuse is suspicious).
-func exchanged(t *fakeToken) bool {
-	return t.reason != nil && (*t.reason == domain.RevokedReasonRefresh || *t.reason == "rotated")
+// invalidTokenCase is a token the internal token endpoints must reject, and what the repository
+// answers if the service asks it.
+type invalidTokenCase struct {
+	name    string
+	token   func(t *testing.T, svc *AuthService) string
+	repoErr error
+	want    error
 }
 
-// sameClient mirrors f_auth_login_session's IP match: an IPv6 address by its /64.
-func sameClient(a, b *string) bool {
-	if a == nil || b == nil {
-		return a == b
+// invalidTokenCases are the tokens GetTokenDetails, RevokeToken and RevokeAllTokens reject.
+func invalidTokenCases() []invalidTokenCase {
+	sealed := func(t *testing.T, svc *AuthService) string {
+		token, _ := sealedToken(t, svc)
+		return token
 	}
 
-	return security.ClientKey(*a) == security.ClientKey(*b)
-}
-
-func eqPtr(a, b *string) bool {
-	if a == nil || b == nil {
-		return a == b
+	return []invalidTokenCase{
+		{
+			name:  "not a sealed token",
+			token: func(*testing.T, *AuthService) string { return "garbage" },
+			want:  domain.ErrInvalidToken,
+		},
+		{
+			name:    "sealed token the repository does not know",
+			token:   sealed,
+			repoErr: domain.ErrTokenNotFound,
+			want:    domain.ErrTokenNotFound,
+		},
+		{
+			name:    "repository fails",
+			token:   sealed,
+			repoErr: errDB,
+			want:    errDB,
+		},
 	}
-
-	return *a == *b
 }
 
-// =============================================================================
-// Test environment
-// =============================================================================
-
-// testClock is a controllable clock shared by the service and the fake repository.
-type testClock struct {
-	mu  sync.Mutex
-	now time.Time
-}
-
-func (c *testClock) Now() time.Time {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	return c.now
-}
-
-func (c *testClock) Advance(d time.Duration) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.now = c.now.Add(d)
-}
-
-// testEnv is an AuthService with real crypto, cache and guard; only the database is faked.
-type testEnv struct {
-	svc    *AuthService
-	repo   *fakeRepository
-	cache  *infrastructure.SessionCache
-	clock  *testClock
-	sealer security.TokenSealer
-	user   *fakeUser
-}
-
-type envOption func(*config.Config, *AuthServiceParams)
-
-func newTestEnv(t *testing.T, opts ...envOption) *testEnv {
+// login logs in as creds and fails the test on error.
+func login(t *testing.T, svc *AuthService, creds *domain.Credentials, meta domain.Metadata) *domain.TokenPair {
 	t.Helper()
 
-	cfg := &config.Config{Environment: "test", Auth: config.AuthConfig{
-		AccessTokenTTL:         15 * time.Minute,
-		RefreshTokenTTL:        24 * time.Hour,
-		SessionCacheTTL:        time.Minute,
-		LoginMaxAttempts:       5,
-		LoginBlockWindow:       15 * time.Minute,
-		LoginBlacklistAttempts: 8,
-		LoginBlacklistWindow:   24 * time.Hour,
-	}}
-
-	sealer, err := security.NewTokenSealer(security.Options{
-		TokenHMACSecret:    []byte(strings.Repeat("h", security.MinHMACSecretSize)),
-		TokenEncryptionKey: []byte(strings.Repeat("e", security.EncryptionKeySize)),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	hasher, err := security.NewPasswordHasher(security.Options{Password: security.PasswordOptions{Cost: bcrypt.MinCost}})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	hash, _ := hasher.Hash(context.Background(), testPassword)
-
-	clock := &testClock{now: time.Date(2026, 9, 26, 10, 0, 0, 0, time.UTC)}
-	repo := newFakeRepository(clock.Now)
-	user := &fakeUser{id: 1, uuid: uuid.New(), email: "jane@example.com", passwordHash: hash, active: true}
-	repo.addUser(user)
-
-	lc := fxtest.NewLifecycle(t)
-	p := AuthServiceParams{
-		Lifecycle: lc,
-		Config:    cfg,
-		Repo:      repo,
-		Users:     repo,
-		Sealer:    sealer,
-		Hasher:    hasher,
-		Logger:    zap.NewNop(),
-	}
-	for _, opt := range opts {
-		opt(cfg, &p)
-	}
-
-	s := cache.NewStore(cache.Options{Driver: cache.DriverMemory})
-	sessionCache := infrastructure.NewSessionCache(s, cfg, zap.NewNop())
-	p.Cache = sessionCache
-	p.Guard = infrastructure.NewLoginGuard(infrastructure.LoginGuardParams{
-		Lifecycle: lc,
-		Cache:     s,
-		Config:    cfg,
-		Logger:    zap.NewNop(),
-	})
-
-	svc := NewAuthService(p)
-	svc.now = clock.Now
-
-	return &testEnv{svc: svc, repo: repo, cache: sessionCache, clock: clock, sealer: sealer, user: user}
-}
-
-func (e *testEnv) login(t *testing.T, meta domain.Metadata) *domain.TokenPair {
-	t.Helper()
-	pair, err := e.svc.Login(context.Background(), domain.LoginInput{Email: e.user.email, Password: testPassword, Metadata: meta})
+	input := domain.LoginInput{Email: creds.Email, Password: testPassword, Metadata: meta}
+	pair, err := svc.Login(context.Background(), input)
 	if err != nil {
 		t.Fatalf("Login() error = %v", err)
 	}
@@ -573,175 +192,309 @@ func (e *testEnv) login(t *testing.T, meta domain.Metadata) *domain.TokenPair {
 	return pair
 }
 
-func (e *testEnv) authenticate(t *testing.T, token string) (*domain.Identity, error) {
-	t.Helper()
-	return e.svc.AuthenticateAccess(context.Background(), token)
+// authenticate calls AuthenticateAccess with a background context.
+func authenticate(svc *AuthService, token string) (*domain.Identity, error) {
+	return svc.AuthenticateAccess(context.Background(), token)
 }
 
-func mustAuthenticate(t *testing.T, e *testEnv, token string) *domain.Identity {
+// cacheSession authenticates token once, so its session is in the session cache.
+func cacheSession(t *testing.T, svc *AuthService, token string) *domain.Identity {
 	t.Helper()
-	id, err := e.authenticate(t, token)
+
+	identity, err := authenticate(svc, token)
 	if err != nil {
-		t.Fatalf("AuthenticateAccess() error = %v, want nil", err)
+		t.Fatalf("AuthenticateAccess() error = %v", err)
 	}
 
-	return id
+	return identity
 }
 
-func wantErr(t *testing.T, got, want error) {
+// openHash unseals token and returns the hash the repository stores for it.
+func openHash(t *testing.T, svc *AuthService, token string) string {
 	t.Helper()
-	if !errors.Is(got, want) {
-		t.Fatalf("error = %v, want %v", got, want)
+
+	raw, err := svc.sealer.Open(token)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
 	}
+
+	return security.HashToken(raw)
 }
 
-var browser = domain.Metadata{IPAddress: "203.0.113.10", UserAgent: "Firefox"}
+// cachedSession is one session the session cache holds, with a counter of its loads from the
+// repository.
+type cachedSession struct {
+	token   string
+	session *domain.Session
+	loads   int
+}
 
-// =============================================================================
-// Login
-// =============================================================================
+// newCachedSessions puts one live session per family in the session cache of svc and makes
+// repo.GetSessionByHashFunc serve them, so a test can tell which ones the service invalidates.
+func newCachedSessions(t *testing.T, svc *AuthService, repo *fakeAuthRepository, families int) []*cachedSession {
+	t.Helper()
+
+	byHash := map[string]*cachedSession{}
+	var sessions []*cachedSession
+	for range families {
+		token, hash := sealedToken(t, svc)
+		_, refreshHash := sealedToken(t, svc)
+		cached := &cachedSession{token: token, session: liveSession(hash, refreshHash)}
+		byHash[hash] = cached
+		sessions = append(sessions, cached)
+	}
+
+	repo.GetSessionByHashFunc = func(_ context.Context, hash string) (*domain.Session, error) {
+		cached := byHash[hash]
+		cached.loads++
+
+		return cached.session, nil
+	}
+
+	for _, cached := range sessions {
+		cacheSession(t, svc, cached.token)
+	}
+
+	return sessions
+}
+
+// reloaded reports whether authenticating the session again had to load it from the repository,
+// that is whether the service invalidated it.
+func (c *cachedSession) reloaded(t *testing.T, svc *AuthService) bool {
+	t.Helper()
+
+	before := c.loads
+	if _, err := authenticate(svc, c.token); err != nil {
+		t.Fatalf("AuthenticateAccess() error = %v", err)
+	}
+
+	return c.loads > before
+}
 
 func TestAuthService_Login_IssuesSealedTokensAndStoresOnlyHashes(t *testing.T) {
-	e := newTestEnv(t)
-	pair := e.login(t, browser)
+	creds := testCredentials(t)
+	var got domain.NewSessionParams
+	svc := newTestService(t, AuthServiceParams{Repo: recordingLoginRepository(&got), Users: usersWith(creds)})
 
-	for _, tok := range []string{pair.AccessToken, pair.RefreshToken} {
-		raw, err := e.sealer.Open(tok)
+	pair := login(t, svc, creds, browser)
+
+	if hash := openHash(t, svc, pair.AccessToken); got.AccessHash != hash {
+		t.Errorf("stored access hash = %q, want the hash of the issued access token %q", got.AccessHash, hash)
+	}
+
+	if hash := openHash(t, svc, pair.RefreshToken); got.RefreshHash != hash {
+		t.Errorf("stored refresh hash = %q, want the hash of the issued refresh token %q", got.RefreshHash, hash)
+	}
+
+	for _, token := range []string{pair.AccessToken, pair.RefreshToken} {
+		raw, err := svc.sealer.Open(token)
 		if err != nil {
-			t.Fatalf("issued token does not open: %v", err)
+			t.Fatalf("Open() error = %v", err)
 		}
 
-		stored := e.repo.byHash(security.HashToken(raw))
-		if stored == nil {
-			t.Fatal("hash of issued token not stored")
-		}
-
-		if stored.hash == raw || strings.Contains(tok, raw) {
-			t.Error("raw token leaked into storage or sealed token")
+		if strings.Contains(token, raw) {
+			t.Error("sealed token contains the raw token")
 		}
 	}
 
-	id := mustAuthenticate(t, e, pair.AccessToken)
-	if id.UserUUID != e.user.uuid || id.Session == nil {
-		t.Errorf("identity = %+v, want user %v with session", id, e.user.uuid)
+	if got.UserID != creds.UserID {
+		t.Errorf("session user ID = %d, want %d", got.UserID, creds.UserID)
+	}
+
+	if got.FamilyUUID == uuid.Nil {
+		t.Error("session family UUID = uuid.Nil, want a new family")
+	}
+
+	if want := testNow.Add(15 * time.Minute); !got.AccessExpiresAt.Equal(want) {
+		t.Errorf("access expiry = %v, want %v", got.AccessExpiresAt, want)
+	}
+
+	if want := testNow.Add(24 * time.Hour); !got.RefreshExpiresAt.Equal(want) {
+		t.Errorf("refresh expiry = %v, want %v", got.RefreshExpiresAt, want)
 	}
 }
 
-func TestAuthService_Login_InvalidCredentialsLookTheSame(t *testing.T) {
-	e := newTestEnv(t)
-
-	_, errWrongPassword := e.svc.Login(context.Background(), domain.LoginInput{Email: e.user.email, Password: "nope", Metadata: browser})
-	_, errUnknownEmail := e.svc.Login(context.Background(), domain.LoginInput{Email: "ghost@example.com", Password: "nope", Metadata: domain.Metadata{IPAddress: "198.51.100.1"}})
-
-	wantErr(t, errWrongPassword, domain.ErrInvalidCredentials)
-	wantErr(t, errUnknownEmail, domain.ErrInvalidCredentials)
-}
-
-func TestAuthService_Login_InactiveUserOnlyAfterCorrectPassword(t *testing.T) {
-	e := newTestEnv(t)
-	e.user.active = false
-
-	_, err := e.svc.Login(context.Background(), domain.LoginInput{Email: e.user.email, Password: "nope", Metadata: browser})
-	wantErr(t, err, domain.ErrInvalidCredentials)
-
-	_, err = e.svc.Login(context.Background(), domain.LoginInput{Email: e.user.email, Password: testPassword, Metadata: browser})
-	wantErr(t, err, domain.ErrUserInactive)
-}
-
-func TestAuthService_Login_SameDeviceDifferentIPRotatesSession(t *testing.T) {
-	e := newTestEnv(t)
-	first := e.login(t, domain.Metadata{IPAddress: "203.0.113.10", UserAgent: "App", DeviceID: "phone-1"})
-	// Cached, so a later change must invalidate it.
-	firstID := mustAuthenticate(t, e, first.AccessToken)
-
-	second := e.login(t, domain.Metadata{IPAddress: "198.51.100.7", UserAgent: "App", DeviceID: "phone-1"})
-	secondID := mustAuthenticate(t, e, second.AccessToken)
-
-	if secondID.FamilyUUID != firstID.FamilyUUID {
-		t.Error("login from the same device created a new session instead of rotating")
+func TestAuthService_Login_TrimsClientMetadata(t *testing.T) {
+	longDevice := strings.Repeat("d", 150)
+	longAgent := strings.Repeat("a", 600)
+	tests := []struct {
+		name       string
+		meta       domain.Metadata
+		wantIP     *string
+		wantAgent  *string
+		wantDevice *string
+	}{
+		{
+			name:       "values with spaces are trimmed",
+			meta:       domain.Metadata{IPAddress: " 203.0.113.10 ", UserAgent: " Firefox ", DeviceID: " phone "},
+			wantIP:     new("203.0.113.10"),
+			wantAgent:  new("Firefox"),
+			wantDevice: new("phone"),
+		},
+		{
+			name:       "long user agent and device ID are truncated",
+			meta:       domain.Metadata{IPAddress: "203.0.113.10", UserAgent: longAgent, DeviceID: longDevice},
+			wantIP:     new("203.0.113.10"),
+			wantAgent:  new(longAgent[:maxUserAgentLength]),
+			wantDevice: new(longDevice[:maxDeviceIDLength]),
+		},
+		{
+			name:   "empty values are stored as nil",
+			meta:   domain.Metadata{IPAddress: "203.0.113.10", UserAgent: "  "},
+			wantIP: new("203.0.113.10"),
+		},
 	}
 
-	if _, err := e.authenticate(t, first.AccessToken); err == nil {
-		t.Error("access token from before the rotation still authenticates")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			creds := testCredentials(t)
+			var got domain.NewSessionParams
+			svc := newTestService(t, AuthServiceParams{Repo: recordingLoginRepository(&got), Users: usersWith(creds)})
+
+			login(t, svc, creds, tt.meta)
+
+			if deref(got.IPAddress) != deref(tt.wantIP) {
+				t.Errorf("IP address = %v, want %v", deref(got.IPAddress), deref(tt.wantIP))
+			}
+
+			if deref(got.UserAgent) != deref(tt.wantAgent) {
+				t.Errorf("user agent = %v, want %v", deref(got.UserAgent), deref(tt.wantAgent))
+			}
+
+			if deref(got.DeviceID) != deref(tt.wantDevice) {
+				t.Errorf("device ID = %v, want %v", deref(got.DeviceID), deref(tt.wantDevice))
+			}
+		})
 	}
 }
 
-func TestAuthService_Login_WithoutDeviceMatchesByIPAndUserAgent(t *testing.T) {
-	e := newTestEnv(t)
-	first := e.login(t, browser)
-	firstID := mustAuthenticate(t, e, first.AccessToken)
+func TestAuthService_Login_InvalidatesReplacedSession(t *testing.T) {
+	creds := testCredentials(t)
+	repo := &fakeAuthRepository{}
+	svc := newTestService(t, AuthServiceParams{Repo: repo, Users: usersWith(creds)})
+	sessions := newCachedSessions(t, svc, repo, 2)
+	replaced, other := sessions[0], sessions[1]
+	repo.CreateLoginSessionFunc = func(
+		_ context.Context, p domain.NewSessionParams,
+	) (*domain.LoginSessionResult, error) {
+		return &domain.LoginSessionResult{FamilyUUID: p.FamilyUUID, StaleFamilyUUID: replaced.session.FamilyUUID}, nil
+	}
 
-	t.Run("same IP and User-Agent rotates", func(t *testing.T) {
-		again := e.login(t, browser)
-		if id := mustAuthenticate(t, e, again.AccessToken); id.FamilyUUID != firstID.FamilyUUID {
-			t.Error("expected the same session family")
+	login(t, svc, creds, browser)
+
+	if !replaced.reloaded(t, svc) {
+		t.Error("replaced session still served from the cache, want it invalidated")
+	}
+
+	if other.reloaded(t, svc) {
+		t.Error("unrelated session reloaded, want it to stay cached")
+	}
+}
+
+func TestAuthService_Login_RejectsInvalidCredentialsTheSameWay(t *testing.T) {
+	tests := []struct {
+		name  string
+		email string
+	}{
+		{"wrong password", "jane@example.com"},
+		{"unknown email", "ghost@example.com"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := newTestService(t, AuthServiceParams{Repo: loginRepository(), Users: usersWith(testCredentials(t))})
+			input := domain.LoginInput{Email: tt.email, Password: "nope", Metadata: browser}
+
+			_, err := svc.Login(context.Background(), input)
+
+			wantErr(t, err, domain.ErrInvalidCredentials)
+		})
+	}
+}
+
+func TestAuthService_Login_ChecksStatusOnlyAfterPassword(t *testing.T) {
+	tests := []struct {
+		name     string
+		password string
+		want     error
+	}{
+		{"inactive user, wrong password", "nope", domain.ErrInvalidCredentials},
+		{"inactive user, right password", testPassword, domain.ErrUserInactive},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			creds := testCredentials(t)
+			creds.Active = false
+			svc := newTestService(t, AuthServiceParams{Repo: loginRepository(), Users: usersWith(creds)})
+			input := domain.LoginInput{Email: creds.Email, Password: tt.password, Metadata: browser}
+
+			_, err := svc.Login(context.Background(), input)
+
+			wantErr(t, err, tt.want)
+		})
+	}
+}
+
+func TestAuthService_Login_ReturnsRepositoryError(t *testing.T) {
+	t.Run("user lookup fails", func(t *testing.T) {
+		users := &fakeUserProvider{
+			GetCredentialsByEmailFunc: func(context.Context, string) (*domain.Credentials, error) {
+				return nil, errDB
+			},
 		}
+		svc := newTestService(t, AuthServiceParams{Repo: &fakeAuthRepository{}, Users: users})
+		input := domain.LoginInput{Email: "jane@example.com", Password: testPassword, Metadata: browser}
+
+		_, err := svc.Login(context.Background(), input)
+
+		wantErr(t, err, errDB)
 	})
 
-	t.Run("same IP, different User-Agent creates a separate session", func(t *testing.T) {
-		chromeMeta := domain.Metadata{IPAddress: browser.IPAddress, UserAgent: "Chrome"}
-		chrome := e.login(t, chromeMeta)
-		chromeID := mustAuthenticate(t, e, chrome.AccessToken)
-		if chromeID.FamilyUUID == firstID.FamilyUUID {
-			t.Error("a different browser behind the same IP rotated the other browser's session")
+	t.Run("session cannot be stored", func(t *testing.T) {
+		creds := testCredentials(t)
+		repo := &fakeAuthRepository{
+			CreateLoginSessionFunc: func(context.Context, domain.NewSessionParams) (*domain.LoginSessionResult, error) {
+				return nil, errDB
+			},
 		}
+		svc := newTestService(t, AuthServiceParams{Repo: repo, Users: usersWith(creds)})
+		input := domain.LoginInput{Email: creds.Email, Password: testPassword, Metadata: browser}
 
-		if e.repo.activeFamilyCount(firstID.FamilyUUID) != 2 {
-			t.Error("the Firefox session was revoked by the Chrome login")
-		}
+		_, err := svc.Login(context.Background(), input)
+
+		wantErr(t, err, errDB)
 	})
 }
-
-func TestAuthService_Login_WithoutDeviceMatchesIPv6BySlash64(t *testing.T) {
-	e := newTestEnv(t)
-	meta := func(ip string) domain.Metadata { return domain.Metadata{IPAddress: ip, UserAgent: "Firefox"} }
-	first := mustAuthenticate(t, e, e.login(t, meta("2001:db8:1:2::1")).AccessToken)
-
-	if id := mustAuthenticate(t, e, e.login(t, meta("2001:db8:1:2::99")).AccessToken); id.FamilyUUID != first.FamilyUUID {
-		t.Error("a new address in the same /64 created a new session, want the same one rotated")
-	}
-
-	if id := mustAuthenticate(t, e, e.login(t, meta("2001:db8:1:3::1")).AccessToken); id.FamilyUUID == first.FamilyUUID {
-		t.Error("an address in another /64 rotated the session, want a new one")
-	}
-}
-
-func TestAuthService_Login_DifferentDeviceCreatesNewSession(t *testing.T) {
-	e := newTestEnv(t)
-	a := mustAuthenticate(t, e, e.login(t, domain.Metadata{IPAddress: "203.0.113.10", DeviceID: "phone-1"}).AccessToken)
-	b := mustAuthenticate(t, e, e.login(t, domain.Metadata{IPAddress: "203.0.113.10", DeviceID: "laptop-1"}).AccessToken)
-	if a.FamilyUUID == b.FamilyUUID {
-		t.Error("two devices share one session")
-	}
-}
-
-// =============================================================================
-// Brute-force protection
-// =============================================================================
 
 func TestAuthService_Login_BruteForceWarnsThenBlocks(t *testing.T) {
-	e := newTestEnv(t)
-	bad := domain.LoginInput{Email: e.user.email, Password: "wrong", Metadata: browser}
+	creds := testCredentials(t)
+	svc := newTestService(t, AuthServiceParams{Repo: loginRepository(), Users: usersWith(creds)})
+	bad := domain.LoginInput{Email: creds.Email, Password: "wrong", Metadata: browser}
 
 	var errs []error
 	for range 5 {
-		_, err := e.svc.Login(context.Background(), bad)
+		_, err := svc.Login(context.Background(), bad)
 		errs = append(errs, err)
 	}
 
 	wantErr(t, errs[0], domain.ErrInvalidCredentials)
-	// 2 attempts left.
+	wantErr(t, errs[1], domain.ErrInvalidCredentials)
+	// From the 3rd failure on, 2 or fewer attempts are left.
 	wantErr(t, errs[2], domain.ErrInvalidCredentialsWarning)
+	wantErr(t, errs[3], domain.ErrInvalidCredentialsWarning)
 	wantErr(t, errs[4], domain.ErrInvalidCredentialsWarning)
 
 	// Blocked now, even with the right password.
-	_, err := e.svc.Login(context.Background(), domain.LoginInput{Email: e.user.email, Password: testPassword, Metadata: browser})
+	good := domain.LoginInput{Email: creds.Email, Password: testPassword, Metadata: browser}
+	_, err := svc.Login(context.Background(), good)
 	wantErr(t, err, domain.ErrTooManyAttempts)
 }
 
 func TestAuthService_Login_ConcurrentAttemptsCannotExceedLimit(t *testing.T) {
-	e := newTestEnv(t)
-	bad := domain.LoginInput{Email: e.user.email, Password: "wrong", Metadata: browser}
+	creds := testCredentials(t)
+	svc := newTestService(t, AuthServiceParams{Repo: loginRepository(), Users: usersWith(creds)})
+	bad := domain.LoginInput{Email: creds.Email, Password: "wrong", Metadata: browser}
 
 	var (
 		wg     sync.WaitGroup
@@ -750,7 +503,7 @@ func TestAuthService_Login_ConcurrentAttemptsCannotExceedLimit(t *testing.T) {
 	)
 	for range 20 {
 		wg.Go(func() {
-			_, err := e.svc.Login(context.Background(), bad)
+			_, err := svc.Login(context.Background(), bad)
 			if !errors.Is(err, domain.ErrTooManyAttempts) {
 				mu.Lock()
 				passed++
@@ -767,409 +520,770 @@ func TestAuthService_Login_ConcurrentAttemptsCannotExceedLimit(t *testing.T) {
 }
 
 func TestAuthService_Login_SuccessClearsShortWindow(t *testing.T) {
-	e := newTestEnv(t)
-	bad := domain.LoginInput{Email: e.user.email, Password: "wrong", Metadata: browser}
-	for range 4 {
-		_, _ = e.svc.Login(context.Background(), bad)
+	creds := testCredentials(t)
+	svc := newTestService(t, AuthServiceParams{Repo: loginRepository(), Users: usersWith(creds)})
+	bad := domain.LoginInput{Email: creds.Email, Password: "wrong", Metadata: browser}
+	for i := range 4 {
+		if _, err := svc.Login(context.Background(), bad); err == nil {
+			t.Fatalf("failed attempt %d: Login() error = nil, want a rejection", i+1)
+		}
 	}
 
-	e.login(t, browser)
+	login(t, svc, creds, browser)
 
-	_, err := e.svc.Login(context.Background(), bad)
+	_, err := svc.Login(context.Background(), bad)
 	// The counter restarted: no warning yet.
 	wantErr(t, err, domain.ErrInvalidCredentials)
 }
 
 func TestAuthService_Login_FailuresElsewhereCannotLockTheOwnerOut(t *testing.T) {
-	e := newTestEnv(t)
+	creds := testCredentials(t)
+	svc := newTestService(t, AuthServiceParams{Repo: loginRepository(), Users: usersWith(creds)})
 	for i := range 20 {
 		ip := "198.51.100." + strconv.Itoa(i)
-		_, _ = e.svc.Login(context.Background(), domain.LoginInput{Email: e.user.email, Password: "wrong", Metadata: domain.Metadata{IPAddress: ip}})
+		input := domain.LoginInput{Email: creds.Email, Password: "wrong", Metadata: domain.Metadata{IPAddress: ip}}
+		if _, err := svc.Login(context.Background(), input); err == nil {
+			t.Fatalf("attempt from %s: Login() error = nil, want a rejection", ip)
+		}
 	}
 
-	e.login(t, domain.Metadata{IPAddress: "192.0.2.99"})
+	login(t, svc, creds, domain.Metadata{IPAddress: "192.0.2.99"})
 }
 
-// =============================================================================
-// Recaptcha (optional dependency)
-// =============================================================================
-
-type fakeVerifier struct{ err error }
-
-func (f fakeVerifier) Verify(context.Context, string, string) error { return f.err }
-
 func TestAuthService_Login_RecaptchaIsOptional(t *testing.T) {
-	enable := func(cfg *config.Config, _ *AuthServiceParams) { cfg.Auth.RecaptchaOnLogin = true }
+	failing := fakeVerifier{err: errors.New("bad")}
 
 	t.Run("enabled but no verifier wired: login works", func(t *testing.T) {
-		e := newTestEnv(t, enable)
-		e.login(t, browser)
+		creds := testCredentials(t)
+		cfg := testConfig()
+		cfg.Auth.RecaptchaOnLogin = true
+		svc := newTestService(t, AuthServiceParams{Config: cfg, Repo: loginRepository(), Users: usersWith(creds)})
+
+		login(t, svc, creds, browser)
 	})
 
 	t.Run("enabled with a failing verifier: rejected", func(t *testing.T) {
-		e := newTestEnv(t, enable, func(_ *config.Config, p *AuthServiceParams) { p.Recaptcha = fakeVerifier{err: errors.New("bad")} })
-		_, err := e.svc.Login(context.Background(), domain.LoginInput{Email: e.user.email, Password: testPassword, Metadata: browser})
+		creds := testCredentials(t)
+		cfg := testConfig()
+		cfg.Auth.RecaptchaOnLogin = true
+		svc := newTestService(t, AuthServiceParams{
+			Config:    cfg,
+			Repo:      loginRepository(),
+			Users:     usersWith(creds),
+			Recaptcha: failing,
+		})
+		input := domain.LoginInput{Email: creds.Email, Password: testPassword, Metadata: browser}
+
+		_, err := svc.Login(context.Background(), input)
+
 		wantErr(t, err, domain.ErrRecaptchaFailed)
 	})
 
 	t.Run("disabled: verifier not called", func(t *testing.T) {
-		e := newTestEnv(t, func(_ *config.Config, p *AuthServiceParams) { p.Recaptcha = fakeVerifier{err: errors.New("bad")} })
-		e.login(t, browser)
+		creds := testCredentials(t)
+		svc := newTestService(t, AuthServiceParams{
+			Repo:      loginRepository(),
+			Users:     usersWith(creds),
+			Recaptcha: failing,
+		})
+
+		login(t, svc, creds, browser)
 	})
 }
 
-// =============================================================================
-// AuthenticateAccess
-// =============================================================================
+func TestAuthService_AuthenticateAccess_ReturnsIdentityOfSession(t *testing.T) {
+	repo := &fakeAuthRepository{}
+	svc := newTestService(t, AuthServiceParams{Repo: repo})
+	token, hash := sealedToken(t, svc)
+	session := liveSession(hash, "refresh-hash")
+	repo.GetSessionByHashFunc = func(context.Context, string) (*domain.Session, error) { return session, nil }
 
-func TestAuthService_Authenticate_RejectsRefreshTokenRawTokenAndHash(t *testing.T) {
-	e := newTestEnv(t)
-	pair := e.login(t, browser)
-	raw, _ := e.sealer.Open(pair.AccessToken)
+	identity, err := authenticate(svc, token)
 
-	_, err := e.authenticate(t, pair.RefreshToken)
-	wantErr(t, err, domain.ErrInvalidTokenType)
+	if err != nil {
+		t.Fatalf("AuthenticateAccess() error = %v", err)
+	}
 
-	_, err = e.authenticate(t, raw)
-	wantErr(t, err, domain.ErrInvalidToken)
-
-	_, err = e.authenticate(t, security.HashToken(raw))
-	wantErr(t, err, domain.ErrInvalidToken)
+	want := &domain.Identity{
+		UserID:     session.UserID,
+		UserUUID:   session.UserUUID,
+		Email:      session.Email,
+		FamilyUUID: session.FamilyUUID,
+		TokenUUID:  session.Access.UUID,
+		ExpiresAt:  session.Access.ExpiresAt,
+		Session:    session,
+	}
+	if *identity != *want {
+		t.Errorf("AuthenticateAccess() = %+v, want %+v", identity, want)
+	}
 }
 
-func TestAuthService_Authenticate_ExpiredAccessToken(t *testing.T) {
-	e := newTestEnv(t)
-	pair := e.login(t, browser)
-	mustAuthenticate(t, e, pair.AccessToken)
+func TestAuthService_AuthenticateAccess_ChecksSessionState(t *testing.T) {
+	revokedAt := testNow.Add(-time.Minute)
+	tests := []struct {
+		name         string
+		useRefresh   bool
+		modify       func(s *domain.Session)
+		want         error
+		wantIdentity bool
+	}{
+		{
+			name:       "refresh token instead of an access token",
+			useRefresh: true,
+			want:       domain.ErrInvalidTokenType,
+		},
+		{
+			name:   "user inactive",
+			modify: func(s *domain.Session) { s.UserActive = false },
+			want:   domain.ErrUserInactive,
+		},
+		{
+			name: "user inactive and access token revoked",
+			modify: func(s *domain.Session) {
+				s.UserActive = false
+				s.Access.RevokedAt = &revokedAt
+			},
+			want: domain.ErrUserInactive,
+		},
+		{
+			name:   "access token superseded by a newer one",
+			modify: func(s *domain.Session) { s.Access.Hash = "newer-access-hash" },
+			want:   domain.ErrTokenRevoked,
+		},
+		{
+			name:   "access token revoked",
+			modify: func(s *domain.Session) { s.Access.RevokedAt = &revokedAt },
+			want:   domain.ErrTokenRevoked,
+		},
+		{
+			name:   "access token expired",
+			modify: func(s *domain.Session) { s.Access.ExpiresAt = testNow },
+			want:   domain.ErrTokenExpired,
+		},
+	}
 
-	// Expiry is checked even on cache hits.
-	e.clock.Advance(16 * time.Minute)
-	_, err := e.authenticate(t, pair.AccessToken)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := &fakeAuthRepository{}
+			svc := newTestService(t, AuthServiceParams{Repo: repo})
+			accessToken, accessHash := sealedToken(t, svc)
+			refreshToken, refreshHash := sealedToken(t, svc)
+			session := liveSession(accessHash, refreshHash)
+			if tt.modify != nil {
+				tt.modify(session)
+			}
+
+			repo.GetSessionByHashFunc = func(context.Context, string) (*domain.Session, error) { return session, nil }
+
+			token := accessToken
+			if tt.useRefresh {
+				token = refreshToken
+			}
+
+			_, err := authenticate(svc, token)
+
+			wantErr(t, err, tt.want)
+		})
+	}
+}
+
+func TestAuthService_AuthenticateAccess_RejectsUnknownTokens(t *testing.T) {
+	tests := []struct {
+		name  string
+		token func(t *testing.T, svc *AuthService) string
+	}{
+		{
+			name: "raw unsealed token",
+			token: func(*testing.T, *AuthService) string {
+				return security.GenerateToken()
+			},
+		},
+		{
+			name: "stored token hash",
+			token: func(t *testing.T, svc *AuthService) string {
+				_, hash := sealedToken(t, svc)
+				return hash
+			},
+		},
+		{
+			name: "sealed token the repository does not know",
+			token: func(t *testing.T, svc *AuthService) string {
+				token, _ := sealedToken(t, svc)
+				return token
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := &fakeAuthRepository{
+				GetSessionByHashFunc: func(context.Context, string) (*domain.Session, error) {
+					return nil, domain.ErrTokenNotFound
+				},
+			}
+			svc := newTestService(t, AuthServiceParams{Repo: repo})
+
+			_, err := authenticate(svc, tt.token(t, svc))
+
+			wantErr(t, err, domain.ErrInvalidToken)
+		})
+	}
+}
+
+func TestAuthService_AuthenticateAccess_ReturnsRepositoryError(t *testing.T) {
+	repo := &fakeAuthRepository{
+		GetSessionByHashFunc: func(context.Context, string) (*domain.Session, error) { return nil, errDB },
+	}
+	svc := newTestService(t, AuthServiceParams{Repo: repo})
+	token, _ := sealedToken(t, svc)
+
+	_, err := authenticate(svc, token)
+
+	// A database outage must not be reported as a bad token.
+	wantErr(t, err, errDB)
+}
+
+func TestAuthService_AuthenticateAccess_ChecksExpiryOnCacheHit(t *testing.T) {
+	repo := &fakeAuthRepository{}
+	svc := newTestService(t, AuthServiceParams{Repo: repo})
+	session := newCachedSessions(t, svc, repo, 1)[0]
+	// AuthServiceParams has no clock: moving the service clock is the only way to age the session.
+	svc.now = func() time.Time { return testNow.Add(16 * time.Minute) }
+
+	_, err := authenticate(svc, session.token)
+
 	wantErr(t, err, domain.ErrTokenExpired)
-}
-
-func TestAuthService_Authenticate_DeactivatedUserRejectedDespiteCache(t *testing.T) {
-	e := newTestEnv(t)
-	pair := e.login(t, browser)
-	// Cached, so a later change must invalidate it.
-	mustAuthenticate(t, e, pair.AccessToken)
-
-	// What UserService does on deactivation: revoke in its transaction, then drop the cache.
-	e.user.active = false
-	revoker := useradapter.NewSessionRevokerAdapter(e.repo, e.cache)
-	if err := revoker.RevokeUserSessions(context.Background(), e.user.uuid); err != nil {
-		t.Fatal(err)
-	}
-
-	revoker.InvalidateUserSessions(context.Background(), e.user.uuid)
-
-	_, err := e.authenticate(t, pair.AccessToken)
-	wantErr(t, err, domain.ErrUserInactive)
-
-	_, err = e.svc.Refresh(context.Background(), pair.RefreshToken, browser)
-	wantErr(t, err, domain.ErrUserInactive)
-}
-
-func TestAuthService_Authenticate_InactiveUserWithoutRevocation(t *testing.T) {
-	e := newTestEnv(t)
-	pair := e.login(t, browser)
-
-	// Status changed outside the user service, so no session was revoked.
-	e.user.active = false
-
-	_, err := e.authenticate(t, pair.AccessToken)
-	wantErr(t, err, domain.ErrUserInactive)
-
-	_, err = e.svc.Refresh(context.Background(), pair.RefreshToken, browser)
-	wantErr(t, err, domain.ErrUserInactive)
-}
-
-// =============================================================================
-// Logout
-// =============================================================================
-
-func TestAuthService_Logout_RevokesFamilyDespiteCache(t *testing.T) {
-	e := newTestEnv(t)
-	pair := e.login(t, browser)
-	// Cached, so a later change must invalidate it.
-	id := mustAuthenticate(t, e, pair.AccessToken)
-
-	if err := e.svc.Logout(context.Background(), id); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err := e.authenticate(t, pair.AccessToken)
-	wantErr(t, err, domain.ErrTokenRevoked)
-	_, err = e.svc.Refresh(context.Background(), pair.RefreshToken, browser)
-	wantErr(t, err, domain.ErrTokenRevoked)
-}
-
-func TestAuthService_LogoutAll_RevokesEverySession(t *testing.T) {
-	e := newTestEnv(t)
-	phone := e.login(t, domain.Metadata{DeviceID: "phone"})
-	laptop := e.login(t, domain.Metadata{DeviceID: "laptop"})
-	id := mustAuthenticate(t, e, phone.AccessToken)
-	mustAuthenticate(t, e, laptop.AccessToken)
-
-	if err := e.svc.LogoutAll(context.Background(), id); err != nil {
-		t.Fatal(err)
-	}
-
-	for _, tok := range []string{phone.AccessToken, laptop.AccessToken} {
-		_, err := e.authenticate(t, tok)
-		wantErr(t, err, domain.ErrTokenRevoked)
+	if session.loads != 1 {
+		t.Errorf("session loads = %d, want 1 (expiry checked on the cached session)", session.loads)
 	}
 }
 
-// =============================================================================
-// Refresh
-// =============================================================================
+func TestAuthService_AuthenticateAccess_ReloadsSessionAfterUserInvalidation(t *testing.T) {
+	repo := &fakeAuthRepository{}
+	svc := newTestService(t, AuthServiceParams{Repo: repo})
+	session := newCachedSessions(t, svc, repo, 1)[0]
+	inactive := *session.session
+	inactive.UserActive = false
+	session.session = &inactive
 
-func TestAuthService_Refresh_RotatesPairInSameSession(t *testing.T) {
-	e := newTestEnv(t)
-	old := e.login(t, browser)
-	// Cached, so a later change must invalidate it.
-	oldID := mustAuthenticate(t, e, old.AccessToken)
+	// What the user feature does after deactivating a user.
+	svc.cache.InvalidateUser(context.Background(), inactive.UserUUID)
+	_, err := authenticate(svc, session.token)
 
-	fresh, err := e.svc.Refresh(context.Background(), old.RefreshToken, browser)
+	wantErr(t, err, domain.ErrUserInactive)
+}
+
+func TestAuthService_Logout_RevokesFamilyAndInvalidatesCache(t *testing.T) {
+	repo := &fakeAuthRepository{}
+	svc := newTestService(t, AuthServiceParams{Repo: repo})
+	session := newCachedSessions(t, svc, repo, 1)[0]
+	identity := cacheSession(t, svc, session.token)
+	var gotFamily uuid.UUID
+	var gotReason string
+	repo.RevokeFamilyFunc = func(_ context.Context, family uuid.UUID, reason string) error {
+		gotFamily, gotReason = family, reason
+		return nil
+	}
+
+	if err := svc.Logout(context.Background(), identity); err != nil {
+		t.Fatalf("Logout() error = %v", err)
+	}
+
+	if gotFamily != identity.FamilyUUID {
+		t.Errorf("revoked family = %v, want %v", gotFamily, identity.FamilyUUID)
+	}
+
+	if gotReason != domain.RevokedReasonLogout {
+		t.Errorf("revoke reason = %q, want %q", gotReason, domain.RevokedReasonLogout)
+	}
+
+	if !session.reloaded(t, svc) {
+		t.Error("session still served from the cache after logout, want it invalidated")
+	}
+}
+
+func TestAuthService_Logout_ReturnsRepositoryError(t *testing.T) {
+	repo := &fakeAuthRepository{
+		RevokeFamilyFunc: func(context.Context, uuid.UUID, string) error { return errDB },
+	}
+	svc := newTestService(t, AuthServiceParams{Repo: repo})
+
+	err := svc.Logout(context.Background(), &domain.Identity{FamilyUUID: uuid.New()})
+
+	wantErr(t, err, errDB)
+}
+
+func TestAuthService_LogoutAll_RevokesEverySessionOfUser(t *testing.T) {
+	repo := &fakeAuthRepository{}
+	svc := newTestService(t, AuthServiceParams{Repo: repo})
+	sessions := newCachedSessions(t, svc, repo, 2)
+	identity := &domain.Identity{UserUUID: uuid.New()}
+	var gotUser uuid.UUID
+	var gotReason string
+	repo.RevokeAllForUserFunc = func(_ context.Context, user uuid.UUID, reason string) ([]uuid.UUID, error) {
+		gotUser, gotReason = user, reason
+		return []uuid.UUID{sessions[0].session.FamilyUUID, sessions[1].session.FamilyUUID}, nil
+	}
+
+	if err := svc.LogoutAll(context.Background(), identity); err != nil {
+		t.Fatalf("LogoutAll() error = %v", err)
+	}
+
+	if gotUser != identity.UserUUID {
+		t.Errorf("revoked user = %v, want %v", gotUser, identity.UserUUID)
+	}
+
+	if gotReason != domain.RevokedReasonLogout {
+		t.Errorf("revoke reason = %q, want %q", gotReason, domain.RevokedReasonLogout)
+	}
+
+	for i, session := range sessions {
+		if !session.reloaded(t, svc) {
+			t.Errorf("session %d still served from the cache, want every revoked family invalidated", i)
+		}
+	}
+}
+
+func TestAuthService_LogoutAll_ReturnsRepositoryError(t *testing.T) {
+	repo := &fakeAuthRepository{
+		RevokeAllForUserFunc: func(context.Context, uuid.UUID, string) ([]uuid.UUID, error) { return nil, errDB },
+	}
+	svc := newTestService(t, AuthServiceParams{Repo: repo})
+
+	err := svc.LogoutAll(context.Background(), &domain.Identity{UserUUID: uuid.New()})
+
+	wantErr(t, err, errDB)
+}
+
+func TestAuthService_Refresh_ExchangesRefreshTokenForNewPair(t *testing.T) {
+	repo := &fakeAuthRepository{}
+	svc := newTestService(t, AuthServiceParams{Repo: repo})
+	refreshToken, refreshHash := sealedToken(t, svc)
+	var gotHash string
+	var gotParams domain.NewSessionParams
+	repo.RefreshSessionFunc = func(
+		_ context.Context, hash string, p domain.NewSessionParams,
+	) (*domain.RefreshResult, error) {
+		gotHash, gotParams = hash, p
+		return &domain.RefreshResult{Status: domain.RefreshRotated, FamilyUUID: uuid.New()}, nil
+	}
+
+	pair, err := svc.Refresh(context.Background(), refreshToken, browser)
+
 	if err != nil {
 		t.Fatalf("Refresh() error = %v", err)
 	}
 
-	newID := mustAuthenticate(t, e, fresh.AccessToken)
-	if newID.FamilyUUID != oldID.FamilyUUID {
-		t.Error("refresh changed the session family")
+	if gotHash != refreshHash {
+		t.Errorf("refreshed hash = %q, want the hash of the presented refresh token %q", gotHash, refreshHash)
 	}
 
-	_, err = e.authenticate(t, old.AccessToken)
-	wantErr(t, err, domain.ErrTokenRevoked)
+	if hash := openHash(t, svc, pair.AccessToken); gotParams.AccessHash != hash {
+		t.Errorf("stored access hash = %q, want the hash of the new access token %q", gotParams.AccessHash, hash)
+	}
+
+	if hash := openHash(t, svc, pair.RefreshToken); gotParams.RefreshHash != hash {
+		t.Errorf("stored refresh hash = %q, want the hash of the new refresh token %q", gotParams.RefreshHash, hash)
+	}
+
+	// browser sends no device ID: nil lets the database keep the session's device.
+	if gotParams.DeviceID != nil {
+		t.Errorf("device ID = %q, want nil", *gotParams.DeviceID)
+	}
+
+	if deref(gotParams.IPAddress) != browser.IPAddress {
+		t.Errorf("IP address = %v, want %v", deref(gotParams.IPAddress), browser.IPAddress)
+	}
+
+	if deref(gotParams.UserAgent) != browser.UserAgent {
+		t.Errorf("user agent = %v, want %v", deref(gotParams.UserAgent), browser.UserAgent)
+	}
+
+	if want := testNow.Add(15 * time.Minute); !gotParams.AccessExpiresAt.Equal(want) {
+		t.Errorf("access expiry = %v, want %v", gotParams.AccessExpiresAt, want)
+	}
+
+	if want := testNow.Add(24 * time.Hour); !gotParams.RefreshExpiresAt.Equal(want) {
+		t.Errorf("refresh expiry = %v, want %v", gotParams.RefreshExpiresAt, want)
+	}
 }
 
-func TestAuthService_Refresh_ReuseRevokesWholeSession(t *testing.T) {
-	e := newTestEnv(t)
-	old := e.login(t, browser)
-	fresh, err := e.svc.Refresh(context.Background(), old.RefreshToken, browser)
-	if err != nil {
-		t.Fatal(err)
+func TestAuthService_Refresh_MapsRefreshStatus(t *testing.T) {
+	tests := []struct {
+		status          string
+		want            error
+		wantInvalidated bool
+	}{
+		{domain.RefreshRotated, nil, true},
+		{domain.RefreshReused, domain.ErrTokenReused, true},
+		{domain.RefreshNotFound, domain.ErrInvalidToken, false},
+		{domain.RefreshInvalidType, domain.ErrInvalidTokenType, false},
+		{domain.RefreshUserInactive, domain.ErrUserInactive, false},
+		{domain.RefreshRevoked, domain.ErrTokenRevoked, false},
+		{domain.RefreshExpired, domain.ErrTokenExpired, false},
 	}
 
-	// Cached, so the revocation below must invalidate it.
-	mustAuthenticate(t, e, fresh.AccessToken)
+	for _, tt := range tests {
+		t.Run(tt.status, func(t *testing.T) {
+			repo := &fakeAuthRepository{}
+			svc := newTestService(t, AuthServiceParams{Repo: repo})
+			session := newCachedSessions(t, svc, repo, 1)[0]
+			refreshToken, _ := sealedToken(t, svc)
+			repo.RefreshSessionFunc = refreshAnswers(
+				&domain.RefreshResult{Status: tt.status, FamilyUUID: session.session.FamilyUUID},
+				nil,
+			)
 
-	e.clock.Advance(reuseGrace + time.Second)
-	_, err = e.svc.Refresh(context.Background(), old.RefreshToken, browser)
+			pair, err := svc.Refresh(context.Background(), refreshToken, browser)
+
+			if !errors.Is(err, tt.want) {
+				t.Fatalf("Refresh() error = %v, want %v", err, tt.want)
+			}
+
+			if gotPair := pair != nil; gotPair != (tt.want == nil) {
+				t.Errorf("Refresh() returned a pair = %v, want %v", gotPair, tt.want == nil)
+			}
+
+			if got := session.reloaded(t, svc); got != tt.wantInvalidated {
+				t.Errorf("session invalidated = %v, want %v", got, tt.wantInvalidated)
+			}
+		})
+	}
+}
+
+func TestAuthService_Refresh_LogsReuse(t *testing.T) {
+	core, logs := observer.New(zap.InfoLevel)
+	family, user := uuid.New(), uuid.New()
+	repo := &fakeAuthRepository{
+		RefreshSessionFunc: refreshAnswers(
+			&domain.RefreshResult{Status: domain.RefreshReused, FamilyUUID: family, UserUUID: user},
+			nil,
+		),
+	}
+	svc := newTestService(t, AuthServiceParams{Repo: repo, Logger: zap.New(core)})
+	refreshToken, _ := sealedToken(t, svc)
+
+	_, err := svc.Refresh(context.Background(), refreshToken, browser)
+
 	wantErr(t, err, domain.ErrTokenReused)
-
-	_, err = e.authenticate(t, fresh.AccessToken)
-	wantErr(t, err, domain.ErrTokenRevoked)
-	_, err = e.svc.Refresh(context.Background(), fresh.RefreshToken, browser)
-	wantErr(t, err, domain.ErrTokenRevoked)
-}
-
-func TestAuthService_Refresh_RetryWithinGraceOnlyFails(t *testing.T) {
-	e := newTestEnv(t)
-	old := e.login(t, browser)
-	fresh, err := e.svc.Refresh(context.Background(), old.RefreshToken, browser)
-	if err != nil {
-		t.Fatal(err)
+	entries := logs.FilterMessage("auth: refresh token reuse detected, session revoked").All()
+	if len(entries) != 1 {
+		t.Fatalf("reuse log entries = %d, want 1", len(entries))
 	}
 
-	// A second tab refreshing with the same token at once must not log the user out.
-	_, err = e.svc.Refresh(context.Background(), old.RefreshToken, browser)
-	wantErr(t, err, domain.ErrTokenRevoked)
-	mustAuthenticate(t, e, fresh.AccessToken)
+	fields := entries[0].ContextMap()
+	if fields["family_uuid"] != family.String() {
+		t.Errorf("logged family_uuid = %v, want %s", fields["family_uuid"], family)
+	}
+
+	if fields["user_uuid"] != user.String() {
+		t.Errorf("logged user_uuid = %v, want %s", fields["user_uuid"], user)
+	}
 }
 
-func TestAuthService_Refresh_ReuseAfterReloginRevokesSession(t *testing.T) {
-	e := newTestEnv(t)
-	old := e.login(t, browser)
-	again := e.login(t, browser)
+func TestAuthService_Refresh_RejectsUnknownStatus(t *testing.T) {
+	repo := &fakeAuthRepository{RefreshSessionFunc: refreshAnswers(&domain.RefreshResult{Status: "teleported"}, nil)}
+	svc := newTestService(t, AuthServiceParams{Repo: repo})
+	refreshToken, _ := sealedToken(t, svc)
 
-	e.clock.Advance(reuseGrace + time.Second)
-	_, err := e.svc.Refresh(context.Background(), old.RefreshToken, browser)
-	wantErr(t, err, domain.ErrTokenReused)
+	_, err := svc.Refresh(context.Background(), refreshToken, browser)
 
-	_, err = e.authenticate(t, again.AccessToken)
-	wantErr(t, err, domain.ErrTokenRevoked)
+	if err == nil {
+		t.Fatal("Refresh() error = nil, want an unknown refresh status error")
+	}
+
+	if !strings.Contains(err.Error(), `unknown refresh status "teleported"`) {
+		t.Errorf("Refresh() error = %q, want it to name the unknown status", err)
+	}
 }
 
-func TestAuthService_Refresh_RejectsAccessTokenExpiredAndGarbage(t *testing.T) {
-	e := newTestEnv(t)
-	pair := e.login(t, browser)
+func TestAuthService_Refresh_RejectsUnsealedToken(t *testing.T) {
+	svc := newTestService(t, AuthServiceParams{Repo: &fakeAuthRepository{}})
 
-	_, err := e.svc.Refresh(context.Background(), pair.AccessToken, browser)
-	wantErr(t, err, domain.ErrInvalidTokenType)
+	_, err := svc.Refresh(context.Background(), "garbage", browser)
 
-	_, err = e.svc.Refresh(context.Background(), "garbage", browser)
 	wantErr(t, err, domain.ErrInvalidToken)
-
-	e.clock.Advance(25 * time.Hour)
-	_, err = e.svc.Refresh(context.Background(), pair.RefreshToken, browser)
-	wantErr(t, err, domain.ErrTokenExpired)
 }
 
-func TestAuthService_Refresh_KeepsDeviceWhenHeaderMissing(t *testing.T) {
-	e := newTestEnv(t)
-	pair := e.login(t, domain.Metadata{DeviceID: "phone-1"})
+func TestAuthService_Refresh_ReturnsRepositoryError(t *testing.T) {
+	repo := &fakeAuthRepository{RefreshSessionFunc: refreshAnswers(nil, errDB)}
+	svc := newTestService(t, AuthServiceParams{Repo: repo})
+	refreshToken, _ := sealedToken(t, svc)
 
-	fresh, err := e.svc.Refresh(context.Background(), pair.RefreshToken, domain.Metadata{})
-	if err != nil {
-		t.Fatal(err)
-	}
+	_, err := svc.Refresh(context.Background(), refreshToken, browser)
 
-	id := mustAuthenticate(t, e, fresh.AccessToken)
-	if id.Session.DeviceID == nil || *id.Session.DeviceID != "phone-1" {
-		t.Errorf("device after refresh = %v, want phone-1", id.Session.DeviceID)
-	}
+	wantErr(t, err, errDB)
 }
-
-// =============================================================================
-// Sessions, internal endpoints, cleanup
-// =============================================================================
 
 func TestAuthService_ListSessions_FlagsCurrent(t *testing.T) {
-	e := newTestEnv(t)
-	phone := e.login(t, domain.Metadata{DeviceID: "phone"})
-	e.login(t, domain.Metadata{DeviceID: "laptop"})
-	id := mustAuthenticate(t, e, phone.AccessToken)
+	identity := &domain.Identity{UserID: 7, FamilyUUID: uuid.New()}
+	other := uuid.New()
+	var gotUserID int64
+	repo := &fakeAuthRepository{
+		ListActiveSessionsFunc: func(_ context.Context, userID int64) ([]*domain.SessionSummary, error) {
+			gotUserID = userID
+			return []*domain.SessionSummary{{FamilyUUID: other}, {FamilyUUID: identity.FamilyUUID}}, nil
+		},
+	}
+	svc := newTestService(t, AuthServiceParams{Repo: repo})
 
-	sessions, err := e.svc.ListSessions(context.Background(), id)
+	sessions, err := svc.ListSessions(context.Background(), identity)
+
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("ListSessions() error = %v", err)
+	}
+
+	if gotUserID != identity.UserID {
+		t.Errorf("listed user ID = %d, want %d", gotUserID, identity.UserID)
 	}
 
 	if len(sessions) != 2 {
-		t.Fatalf("got %d sessions, want 2", len(sessions))
+		t.Fatalf("ListSessions() returned %d sessions, want 2", len(sessions))
 	}
 
-	current := 0
-	for _, s := range sessions {
-		if s.Current {
-			current++
-			if s.FamilyUUID != id.FamilyUUID {
-				t.Error("wrong session flagged as current")
+	if sessions[0].Current {
+		t.Error("another session flagged current, want only the caller's")
+	}
+
+	if !sessions[1].Current {
+		t.Error("the caller's session is not flagged current")
+	}
+}
+
+func TestAuthService_ListSessions_ReturnsRepositoryError(t *testing.T) {
+	repo := &fakeAuthRepository{
+		ListActiveSessionsFunc: func(context.Context, int64) ([]*domain.SessionSummary, error) { return nil, errDB },
+	}
+	svc := newTestService(t, AuthServiceParams{Repo: repo})
+
+	_, err := svc.ListSessions(context.Background(), &domain.Identity{UserID: 7})
+
+	wantErr(t, err, errDB)
+}
+
+func TestAuthService_GetTokenDetails_ReportsTypeAndStatus(t *testing.T) {
+	tests := []struct {
+		name       string
+		useRefresh bool
+		modify     func(s *domain.Session)
+		wantType   domain.TokenType
+		wantStatus string
+	}{
+		{
+			name:       "refresh token of a live session",
+			useRefresh: true,
+			wantType:   domain.TokenTypeRefresh,
+			wantStatus: domain.TokenStatusActive,
+		},
+		{
+			name:       "access token of a live session",
+			wantType:   domain.TokenTypeAccess,
+			wantStatus: domain.TokenStatusActive,
+		},
+		{
+			name:       "access token superseded by a newer one",
+			modify:     func(s *domain.Session) { s.Access.Hash = "newer-access-hash" },
+			wantType:   domain.TokenTypeAccess,
+			wantStatus: domain.TokenStatusRevoked,
+		},
+		{
+			name:       "expired access token",
+			modify:     func(s *domain.Session) { s.Access.ExpiresAt = testNow },
+			wantType:   domain.TokenTypeAccess,
+			wantStatus: domain.TokenStatusExpired,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := &fakeAuthRepository{
+				GetTokenTypeByHashFunc: func(context.Context, string) (domain.TokenType, error) {
+					return domain.TokenTypeAccess, nil
+				},
 			}
+			svc := newTestService(t, AuthServiceParams{Repo: repo})
+			accessToken, accessHash := sealedToken(t, svc)
+			refreshToken, refreshHash := sealedToken(t, svc)
+			session := liveSession(accessHash, refreshHash)
+			if tt.modify != nil {
+				tt.modify(session)
+			}
+
+			repo.GetSessionByHashFunc = func(context.Context, string) (*domain.Session, error) { return session, nil }
+
+			token := accessToken
+			if tt.useRefresh {
+				token = refreshToken
+			}
+
+			details, err := svc.GetTokenDetails(context.Background(), token)
+
+			if err != nil {
+				t.Fatalf("GetTokenDetails() error = %v", err)
+			}
+
+			if details.TokenType != tt.wantType {
+				t.Errorf("token type = %s, want %s", details.TokenType, tt.wantType)
+			}
+
+			if details.Status != tt.wantStatus {
+				t.Errorf("status = %s, want %s", details.Status, tt.wantStatus)
+			}
+		})
+	}
+}
+
+func TestAuthService_GetTokenDetails_RejectsInvalidTokens(t *testing.T) {
+	for _, tt := range invalidTokenCases() {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := &fakeAuthRepository{
+				GetSessionByHashFunc: func(context.Context, string) (*domain.Session, error) { return nil, tt.repoErr },
+			}
+			svc := newTestService(t, AuthServiceParams{Repo: repo})
+
+			_, err := svc.GetTokenDetails(context.Background(), tt.token(t, svc))
+
+			wantErr(t, err, tt.want)
+		})
+	}
+}
+
+func TestAuthService_RevokeToken_RevokesTheTokensSession(t *testing.T) {
+	repo := &fakeAuthRepository{}
+	svc := newTestService(t, AuthServiceParams{Repo: repo})
+	session := newCachedSessions(t, svc, repo, 1)[0]
+	token, hash := sealedToken(t, svc)
+	var gotHash, gotReason string
+	repo.RevokeFamilyByHashFunc = func(_ context.Context, h, reason string) (uuid.UUID, error) {
+		gotHash, gotReason = h, reason
+		return session.session.FamilyUUID, nil
+	}
+
+	if err := svc.RevokeToken(context.Background(), token); err != nil {
+		t.Fatalf("RevokeToken() error = %v", err)
+	}
+
+	if gotHash != hash {
+		t.Errorf("revoked hash = %q, want %q", gotHash, hash)
+	}
+
+	if gotReason != domain.RevokedReasonAdmin {
+		t.Errorf("revoke reason = %q, want %q", gotReason, domain.RevokedReasonAdmin)
+	}
+
+	if !session.reloaded(t, svc) {
+		t.Error("session still served from the cache, want it invalidated")
+	}
+}
+
+func TestAuthService_RevokeToken_RejectsInvalidTokens(t *testing.T) {
+	for _, tt := range invalidTokenCases() {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := &fakeAuthRepository{
+				RevokeFamilyByHashFunc: func(context.Context, string, string) (uuid.UUID, error) {
+					return uuid.Nil, tt.repoErr
+				},
+			}
+			svc := newTestService(t, AuthServiceParams{Repo: repo})
+
+			err := svc.RevokeToken(context.Background(), tt.token(t, svc))
+
+			wantErr(t, err, tt.want)
+		})
+	}
+}
+
+func TestAuthService_RevokeAllTokens_RevokesEverySessionOfUser(t *testing.T) {
+	repo := &fakeAuthRepository{}
+	svc := newTestService(t, AuthServiceParams{Repo: repo})
+	sessions := newCachedSessions(t, svc, repo, 2)
+	token, hash := sealedToken(t, svc)
+	var gotHash, gotReason string
+	repo.RevokeAllByHashFunc = func(_ context.Context, h, reason string) ([]uuid.UUID, error) {
+		gotHash, gotReason = h, reason
+		return []uuid.UUID{sessions[0].session.FamilyUUID, sessions[1].session.FamilyUUID}, nil
+	}
+
+	if err := svc.RevokeAllTokens(context.Background(), token); err != nil {
+		t.Fatalf("RevokeAllTokens() error = %v", err)
+	}
+
+	if gotHash != hash {
+		t.Errorf("revoked hash = %q, want %q", gotHash, hash)
+	}
+
+	if gotReason != domain.RevokedReasonAdmin {
+		t.Errorf("revoke reason = %q, want %q", gotReason, domain.RevokedReasonAdmin)
+	}
+
+	for i, session := range sessions {
+		if !session.reloaded(t, svc) {
+			t.Errorf("session %d still served from the cache, want every revoked family invalidated", i)
 		}
 	}
+}
 
-	if current != 1 {
-		t.Errorf("%d sessions flagged current, want 1", current)
+func TestAuthService_RevokeAllTokens_RejectsInvalidTokens(t *testing.T) {
+	for _, tt := range invalidTokenCases() {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := &fakeAuthRepository{
+				RevokeAllByHashFunc: func(context.Context, string, string) ([]uuid.UUID, error) {
+					return nil, tt.repoErr
+				},
+			}
+			svc := newTestService(t, AuthServiceParams{Repo: repo})
+
+			err := svc.RevokeAllTokens(context.Background(), tt.token(t, svc))
+
+			wantErr(t, err, tt.want)
+		})
 	}
 }
 
-func TestAuthService_GetTokenDetails(t *testing.T) {
-	e := newTestEnv(t)
-	pair := e.login(t, browser)
+func TestAuthService_CleanupTokens_PassesRetentionCutoff(t *testing.T) {
+	var gotBefore time.Time
+	repo := &fakeAuthRepository{
+		CleanupTokensFunc: func(_ context.Context, before time.Time) (int64, error) {
+			gotBefore = before
+			return 2, nil
+		},
+	}
+	svc := newTestService(t, AuthServiceParams{Repo: repo})
 
-	details, err := e.svc.GetTokenDetails(context.Background(), pair.RefreshToken)
+	deleted, err := svc.CleanupTokens(context.Background(), 7*24*time.Hour)
+
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("CleanupTokens() error = %v", err)
 	}
 
-	if details.TokenType != domain.TokenTypeRefresh || details.Status != domain.TokenStatusActive {
-		t.Errorf("details = %s/%s, want refresh_token/active", details.TokenType, details.Status)
-	}
-
-	_, err = e.svc.GetTokenDetails(context.Background(), "garbage")
-	wantErr(t, err, domain.ErrInvalidToken)
-}
-
-func TestAuthService_RevokeToken(t *testing.T) {
-	e := newTestEnv(t)
-	pair := e.login(t, browser)
-	mustAuthenticate(t, e, pair.AccessToken)
-
-	if err := e.svc.RevokeToken(context.Background(), pair.RefreshToken); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err := e.authenticate(t, pair.AccessToken)
-	wantErr(t, err, domain.ErrTokenRevoked)
-}
-
-func TestAuthService_RevokeAllTokens_RevokesEveryDevice(t *testing.T) {
-	e := newTestEnv(t)
-	phone := e.login(t, domain.Metadata{DeviceID: "phone"})
-	laptop := e.login(t, domain.Metadata{DeviceID: "laptop"})
-	mustAuthenticate(t, e, phone.AccessToken)
-	mustAuthenticate(t, e, laptop.AccessToken)
-
-	if err := e.svc.RevokeAllTokens(context.Background(), phone.RefreshToken); err != nil {
-		t.Fatal(err)
-	}
-
-	for _, tok := range []string{phone.AccessToken, laptop.AccessToken} {
-		_, err := e.authenticate(t, tok)
-		wantErr(t, err, domain.ErrTokenRevoked)
-	}
-}
-
-func TestAuthService_CleanupTokens(t *testing.T) {
-	e := newTestEnv(t)
-	pair := e.login(t, browser)
-	id := mustAuthenticate(t, e, pair.AccessToken)
-	if err := e.svc.Logout(context.Background(), id); err != nil {
-		t.Fatal(err)
-	}
-
-	e.clock.Advance(8 * 24 * time.Hour)
-	fresh := e.login(t, browser)
-
-	deleted, err := e.svc.CleanupTokens(context.Background(), 7*24*time.Hour)
-	if err != nil {
-		t.Fatal(err)
+	if want := testNow.Add(-7 * 24 * time.Hour); !gotBefore.Equal(want) {
+		t.Errorf("cleanup cutoff = %v, want %v (now minus retention)", gotBefore, want)
 	}
 
 	if deleted != 2 {
-		t.Errorf("deleted = %d, want 2 (the pair revoked 8 days ago)", deleted)
+		t.Errorf("CleanupTokens() = %d, want 2 (the repository's count)", deleted)
 	}
-
-	mustAuthenticate(t, e, fresh.AccessToken)
 }
 
-func TestAuthService_CleanupTokens_KeepsLiveSessionStartAndLatestAccess(t *testing.T) {
-	e := newTestEnv(t)
-	started := e.clock.Now()
-	pair := e.login(t, browser)
+func TestWaitOrTimeout_WaitsForBackgroundWork(t *testing.T) {
+	t.Run("background work finishes", func(t *testing.T) {
+		var wg sync.WaitGroup
+		wg.Go(func() {})
 
-	// Refresh daily for 9 days: the first pair is revoked well past the 7-day retention.
-	for range 9 {
-		e.clock.Advance(23 * time.Hour)
-		next, err := e.svc.Refresh(context.Background(), pair.RefreshToken, browser)
-		if err != nil {
-			t.Fatal(err)
+		if err := waitOrTimeout(context.Background(), &wg); err != nil {
+			t.Errorf("waitOrTimeout() error = %v, want nil", err)
 		}
+	})
 
-		pair = next
-	}
+	t.Run("stop deadline ends first", func(t *testing.T) {
+		var wg sync.WaitGroup
+		wg.Add(1)
+		t.Cleanup(wg.Done)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
 
-	if _, err := e.svc.CleanupTokens(context.Background(), 7*24*time.Hour); err != nil {
-		t.Fatal(err)
-	}
-
-	details, err := e.svc.GetTokenDetails(context.Background(), pair.RefreshToken)
-	if err != nil {
-		t.Fatalf("GetTokenDetails() error = %v, want the live session to survive cleanup", err)
-	}
-
-	if !details.Session.CreatedAt.Equal(started) {
-		t.Errorf("session CreatedAt = %v, want %v (the login time)", details.Session.CreatedAt, started)
-	}
-}
-
-func TestAuthService_CleanupTokens_KeepsExchangedRefreshTokenUntilItExpires(t *testing.T) {
-	e := newTestEnv(t)
-	old := e.login(t, browser)
-	if _, err := e.svc.Refresh(context.Background(), old.RefreshToken, browser); err != nil {
-		t.Fatal(err)
-	}
-
-	// Revoked 2h ago, past a 1h retention, but valid for 22h more had it not been exchanged.
-	e.clock.Advance(2 * time.Hour)
-	if _, err := e.svc.CleanupTokens(context.Background(), time.Hour); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err := e.svc.Refresh(context.Background(), old.RefreshToken, browser)
-	wantErr(t, err, domain.ErrTokenReused)
+		if err := waitOrTimeout(ctx, &wg); !errors.Is(err, context.Canceled) {
+			t.Errorf("waitOrTimeout() error = %v, want context.Canceled", err)
+		}
+	})
 }

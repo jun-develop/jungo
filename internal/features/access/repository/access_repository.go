@@ -197,4 +197,4 @@ func mapRole(row sqlc.Role) *domain.Role {
 }
 
 // wrap adds the failed operation to err; domain errors stay matchable with errors.Is/As.
-var wrap = database.Wrapper("access repository")
+var wrap = database.ErrorPrefixer("access repository")
