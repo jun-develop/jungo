@@ -21,3 +21,4 @@ go.work.local.sum
 .env
 /*.sql
 test.json
+TESTING.md
