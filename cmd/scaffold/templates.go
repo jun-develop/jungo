@@ -413,7 +413,7 @@ func map{{.Pascal}}(row sqlc.{{.Model}}) *domain.{{.Pascal}} {
 }
 
 // wrap adds the failed operation to err; domain errors stay matchable with errors.Is/As.
-var wrap = database.Wrapper("{{.Name}} repository")
+var wrap = database.ErrorPrefixer("{{.Name}} repository")
 `
 
 const serviceTmpl = `package service
