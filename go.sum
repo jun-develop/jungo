@@ -50,8 +50,6 @@ github.com/jackc/puddle/v2 v2.2.4 h1:N6Mz6EGB9DL0bz3OEfxJ7eoOpjRHnnjpOh+G8kbLoG8
 github.com/jackc/puddle/v2 v2.2.4/go.mod h1:vriiEXHvEE654aYKXXjOvZM39qJ0q+azkZFrfEOc3H4=
 github.com/json-iterator/go v1.1.12 h1:PV8peI4a0ysnczrg+LtxykD8LfKY9ML6u2jnxaEnrnM=
 github.com/json-iterator/go v1.1.12/go.mod h1:e30LSqwooZae/UwlEbR2852Gd8hjQvJoHmT4TnhNGBo=
-github.com/jun-develop/junkit v0.0.10 h1:RtGIq4C4OFLBCw5EIgJOtuooiZYs1PxVKWamngs59bQ=
-github.com/jun-develop/junkit v0.0.10/go.mod h1:OX6yZMFy5akAmc8mTj7eFv5s2ZOr0/MJj0OgGJC7/qM=
 github.com/jun-develop/junkit v0.0.11 h1:4F8VmviXJQxVGfx3SH0QF1iJiM8MSSXRork21U3ZNao=
 github.com/jun-develop/junkit v0.0.11/go.mod h1:OX6yZMFy5akAmc8mTj7eFv5s2ZOr0/MJj0OgGJC7/qM=
 github.com/klauspost/cpuid/v2 v2.4.2 h1:xRw7IZEsAgVCp6trS/DgWbTAqpixhmywgVgBjYGg1bQ=
