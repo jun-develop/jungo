@@ -9,11 +9,11 @@ package service
 //          who may act on which user.
 // Type: Unit (Func-field fakes)
 //
-// Test functions: 23
-// Total scenarios: 46
+// Test functions: 24
+// Total scenarios: 47
 //
 // #   Test Case                                                             Scenario                                 Expected Result
-// 1   TestUserService_CreateUser_HashesPasswordAndMapsErrors                Valid input                              Repository receives a bcrypt hash of the password
+// 1   TestUserService_CreateUser_HashesPasswordAndMapsErrors                Valid input                              Repository receives a bcrypt hash; one create entry without the password
 // 2   TestUserService_CreateUser_HashesPasswordAndMapsErrors                Repository fails                         Repository error returned unchanged
 // 3   TestUserService_CreateUser_HashesPasswordAndMapsErrors                30 characters but 90 bytes               ErrPasswordTooLong; nothing stored
 // 4   TestUserService_CreateUser_HashesPasswordAndMapsErrors                Hasher fails for another reason          Hasher error returned unchanged; nothing stored
@@ -27,38 +27,39 @@ package service
 // 12  TestUserService_SetPasswordHash_UpdatesStoredHash                     Valid user ID and hash                   Repository stores that hash for that user
 // 13  TestUserService_SetPasswordHash_UpdatesStoredHash                     Repository fails                         Database error
 // 14  TestUserService_ListUsers_PassesFilterToRepository                    Search filter                            Repository receives the same filter; its total returned
-// 15  TestUserService_UpdateUser_UpdatesActiveUserWithoutRevoking           Manager renames an active user           Updated user returned; no session revoked; cache dropped
-// 16  TestUserService_UpdateUser_DeactivationRevokesSessions                Manager deactivates a user               Sessions revoked and cached sessions dropped
-// 17  TestUserService_UpdateUser_DeactivationPropagatesRevokeError          Session revocation fails                 Revocation error returned
-// 18  TestUserService_UpdateUser_PropagatesRepositoryErrors                 Update fails                             Error returned; cached sessions kept
-// 19  TestUserService_UpdateUser_PropagatesRepositoryErrors                 Target row lock fails                    Error returned; nothing updated
-// 20  TestUserService_UpdateUser_EnforcesAuthorization                      Deactivate a weaker user                 Allowed
-// 21  TestUserService_UpdateUser_EnforcesAuthorization                      Deactivate a stronger user               ErrCannotManageStrongerUser; nothing written
-// 22  TestUserService_UpdateUser_EnforcesAuthorization                      Permission removed since the cache       ErrForbidden; nothing written
-// 23  TestUserService_UpdateUser_EnforcesAuthorization                      Actor without the permission             ErrUserNotFound (user hidden)
-// 24  TestUserService_UpdateUser_EnforcesAuthorization                      User changes their own status            ErrCannotChangeOwnStatus
-// 25  TestUserService_DeleteUser_DeletesAndRevokesSessions                  Manager deletes a user                   That user deleted; sessions revoked; cache dropped
-// 26  TestUserService_DeleteUser_DeletesAndRevokesSessions                  Repository delete fails                  Database error; no session revoked
-// 27  TestUserService_DeleteUser_StopsWhenLookupFails                       User lookup fails                        Error returned; nothing deleted, no session revoked
-// 28  TestUserService_DeleteUser_RemovesAvatarFile                          Deleted user had an avatar               Avatar file deleted
-// 29  TestUserService_DeleteUser_LogsAvatarDeleteFailure                    Avatar file deletion fails               DeleteUser still succeeds; failure logged
-// 30  TestUserService_DeleteUser_EnforcesAuthorization                      Delete a user with equal permissions     Allowed
-// 31  TestUserService_DeleteUser_EnforcesAuthorization                      Delete a stronger user                   ErrCannotManageStrongerUser; nothing written
-// 32  TestUserService_DeleteUser_EnforcesAuthorization                      No actor in the request                  ErrUserNotFound (user hidden)
-// 33  TestUserService_DeleteUser_EnforcesAuthorization                      User deletes their own account           ErrCannotDeleteSelf
-// 34  TestUserService_UploadAvatar_ReplacesStoredFile                       User had an avatar                       Record updated before the old file is deleted; cache dropped
-// 35  TestUserService_UploadAvatar_ReplacesStoredFile                       User had no avatar                       Nothing deleted
-// 36  TestUserService_UploadAvatar_ReplacesStoredFile                       Upload fails                             ErrInvalidAvatarFile; record untouched
-// 37  TestUserService_UploadAvatar_ReplacesStoredFile                       Record update fails                      Error returned; new upload deleted, old avatar kept
-// 38  TestUserService_UploadAvatar_ReplacesStoredFile                       User lookup fails                        Error returned; new upload deleted
-// 39  TestUserService_UploadAvatar_RejectsUnauthorizedActorBeforeUploading  No actor in the request                  ErrUserNotFound; nothing uploaded
-// 40  TestUserService_UploadAvatar_ReauthorizesAfterUpload                  Target promoted during the upload        ErrCannotManageStrongerUser; nothing written, upload deleted
-// 41  TestUserService_DeleteAvatar_ClearsURLThenDeletesFile                 User has an avatar                       URL cleared, file deleted, cache dropped
-// 42  TestUserService_DeleteAvatar_ClearsURLThenDeletesFile                 Clearing the URL fails                   Error returned; file kept
-// 43  TestUserService_DeleteAvatar_ClearsURLThenDeletesFile                 No avatar                                No-op
-// 44  TestUserService_DeleteAvatar_ClearsURLThenDeletesFile                 Avatar URL is an empty string            Treated as no avatar
-// 45  TestUserService_DeleteAvatar_ClearsURLThenDeletesFile                 User lookup fails                        Error returned
-// 46  TestUserService_DeleteAvatar_PropagatesLockError                      Row lock fails                           Error returned; nothing updated or deleted
+// 15  TestUserService_UpdateUser_UpdatesActiveUserWithoutRevoking           Manager renames an active user           Updated user returned; no session revoked; cache dropped; one update entry
+// 16  TestUserService_UpdateUser_FailsWhenTheAuditLogFails                  Audit log write fails                    Its error returned; cache not dropped
+// 17  TestUserService_UpdateUser_DeactivationRevokesSessions                Manager deactivates a user               Sessions revoked and cached sessions dropped
+// 18  TestUserService_UpdateUser_DeactivationPropagatesRevokeError          Session revocation fails                 Revocation error returned
+// 19  TestUserService_UpdateUser_PropagatesRepositoryErrors                 Update fails                             Error returned; cached sessions kept
+// 20  TestUserService_UpdateUser_PropagatesRepositoryErrors                 Target row lock fails                    Error returned; nothing updated
+// 21  TestUserService_UpdateUser_EnforcesAuthorization                      Deactivate a weaker user                 Allowed
+// 22  TestUserService_UpdateUser_EnforcesAuthorization                      Deactivate a stronger user               ErrCannotManageStrongerUser; nothing written
+// 23  TestUserService_UpdateUser_EnforcesAuthorization                      Permission removed since the cache       ErrForbidden; nothing written
+// 24  TestUserService_UpdateUser_EnforcesAuthorization                      Actor without the permission             ErrUserNotFound (user hidden)
+// 25  TestUserService_UpdateUser_EnforcesAuthorization                      User changes their own status            ErrCannotChangeOwnStatus
+// 26  TestUserService_DeleteUser_DeletesAndRevokesSessions                  Manager deletes a user                   That user deleted; sessions revoked; cache dropped; one delete entry
+// 27  TestUserService_DeleteUser_DeletesAndRevokesSessions                  Repository delete fails                  Database error; no session revoked
+// 28  TestUserService_DeleteUser_StopsWhenLookupFails                       User lookup fails                        Error returned; nothing deleted, no session revoked
+// 29  TestUserService_DeleteUser_RemovesAvatarFile                          Deleted user had an avatar               Avatar file deleted
+// 30  TestUserService_DeleteUser_LogsAvatarDeleteFailure                    Avatar file deletion fails               DeleteUser still succeeds; failure logged
+// 31  TestUserService_DeleteUser_EnforcesAuthorization                      Delete a user with equal permissions     Allowed
+// 32  TestUserService_DeleteUser_EnforcesAuthorization                      Delete a stronger user                   ErrCannotManageStrongerUser; nothing written
+// 33  TestUserService_DeleteUser_EnforcesAuthorization                      No actor in the request                  ErrUserNotFound (user hidden)
+// 34  TestUserService_DeleteUser_EnforcesAuthorization                      User deletes their own account           ErrCannotDeleteSelf
+// 35  TestUserService_UploadAvatar_ReplacesStoredFile                       User had an avatar                       Record updated before the old file is deleted; cache dropped
+// 36  TestUserService_UploadAvatar_ReplacesStoredFile                       User had no avatar                       Nothing deleted
+// 37  TestUserService_UploadAvatar_ReplacesStoredFile                       Upload fails                             ErrInvalidAvatarFile; record untouched
+// 38  TestUserService_UploadAvatar_ReplacesStoredFile                       Record update fails                      Error returned; new upload deleted, old avatar kept
+// 39  TestUserService_UploadAvatar_ReplacesStoredFile                       User lookup fails                        Error returned; new upload deleted
+// 40  TestUserService_UploadAvatar_RejectsUnauthorizedActorBeforeUploading  No actor in the request                  ErrUserNotFound; nothing uploaded
+// 41  TestUserService_UploadAvatar_ReauthorizesAfterUpload                  Target promoted during the upload        ErrCannotManageStrongerUser; nothing written, upload deleted
+// 42  TestUserService_DeleteAvatar_ClearsURLThenDeletesFile                 User has an avatar                       URL cleared, file deleted, cache dropped
+// 43  TestUserService_DeleteAvatar_ClearsURLThenDeletesFile                 Clearing the URL fails                   Error returned; file kept
+// 44  TestUserService_DeleteAvatar_ClearsURLThenDeletesFile                 No avatar                                No-op
+// 45  TestUserService_DeleteAvatar_ClearsURLThenDeletesFile                 Avatar URL is an empty string            Treated as no avatar
+// 46  TestUserService_DeleteAvatar_ClearsURLThenDeletesFile                 User lookup fails                        Error returned
+// 47  TestUserService_DeleteAvatar_PropagatesLockError                      Row lock fails                           Error returned; nothing updated or deleted
 //
 // =============================================================================
 
@@ -66,6 +67,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -76,6 +78,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"jungo/internal/common/actor"
+	"jungo/internal/common/auditlog"
 	"jungo/internal/features/user/domain"
 )
 
@@ -91,7 +94,7 @@ func TestUserService_CreateUser_HashesPasswordAndMapsErrors(t *testing.T) {
 		repo := &fakeUserRepository{
 			CreateFunc: func(_ context.Context, in domain.CreateUserInput, hash string) (*domain.User, error) {
 				gotInput, gotHash = in, hash
-				return &domain.User{Email: in.Email}, nil
+				return &domain.User{Email: in.Email, FirstName: in.FirstName, LastName: in.LastName}, nil
 			},
 		}
 		input := domain.CreateUserInput{
@@ -100,8 +103,9 @@ func TestUserService_CreateUser_HashesPasswordAndMapsErrors(t *testing.T) {
 			Email:     "jane@example.com",
 			Password:  "s3cret-pw",
 		}
+		audit := &fakeRecorder{}
 
-		user, err := newTestService(t, UserServiceParams{Repo: repo}).CreateUser(context.Background(), input)
+		user, err := newTestService(t, UserServiceParams{Repo: repo, Audit: audit}).CreateUser(context.Background(), input)
 
 		if err != nil {
 			t.Fatalf("CreateUser() error = %v", err)
@@ -117,6 +121,11 @@ func TestUserService_CreateUser_HashesPasswordAndMapsErrors(t *testing.T) {
 
 		if err := bcrypt.CompareHashAndPassword([]byte(gotHash), []byte(input.Password)); err != nil {
 			t.Errorf("stored hash is not a bcrypt hash of the password: %v", err)
+		}
+
+		wantChanges := map[string]any{"email": "jane@example.com", "first_name": "Jane", "last_name": "Doe"}
+		if len(audit.entries) != 1 || audit.entries[0].Action != "create" || !reflect.DeepEqual(audit.entries[0].Changes, wantChanges) {
+			t.Errorf("audit entries = %+v, want one create with %v (no password)", audit.entries, wantChanges)
 		}
 	})
 
@@ -346,7 +355,8 @@ func TestUserService_UpdateUser_UpdatesActiveUserWithoutRevoking(t *testing.T) {
 	}
 	// RevokeUserSessionsFunc is nil: revoking an active user's sessions would panic.
 	sessions := &fakeSessionRevoker{}
-	svc := newTestService(t, UserServiceParams{Repo: repo, Sessions: sessions})
+	audit := &fakeRecorder{}
+	svc := newTestService(t, UserServiceParams{Repo: repo, Sessions: sessions, Audit: audit})
 
 	got, err := svc.UpdateUser(asManager(), userID, domain.UpdateUserInput{FirstName: new("New")})
 
@@ -369,6 +379,28 @@ func TestUserService_UpdateUser_UpdatesActiveUserWithoutRevoking(t *testing.T) {
 	// Cached sessions carry the profile, so they are dropped even when no session is revoked.
 	if !slices.Equal(sessions.invalidated, []uuid.UUID{userID}) {
 		t.Errorf("invalidated users = %v, want [%v]", sessions.invalidated, userID)
+	}
+
+	wantEntry := auditlog.Entry{Action: "update", EntityType: "users", EntityID: userID.String(), Changes: map[string]any{"first_name": "New"}}
+	if len(audit.entries) != 1 || !reflect.DeepEqual(audit.entries[0], wantEntry) {
+		t.Errorf("audit entries = %+v, want [%+v]", audit.entries, wantEntry)
+	}
+}
+
+func TestUserService_UpdateUser_FailsWhenTheAuditLogFails(t *testing.T) {
+	repo := &fakeUserRepository{
+		UpdateFunc: func(_ context.Context, uid uuid.UUID, _ domain.UpdateUserInput) (*domain.User, error) {
+			return &domain.User{UUID: uid, Status: domain.UserStatusActive}, nil
+		},
+	}
+	sessions := &fakeSessionRevoker{}
+	svc := newTestService(t, UserServiceParams{Repo: repo, Sessions: sessions, Audit: &fakeRecorder{err: errDB}})
+
+	_, err := svc.UpdateUser(asManager(), uuid.New(), domain.UpdateUserInput{FirstName: new("New")})
+
+	wantErr(t, err, errDB)
+	if len(sessions.invalidated) != 0 {
+		t.Errorf("invalidated users = %v, want none (the transaction rolled back)", sessions.invalidated)
 	}
 }
 
@@ -529,8 +561,9 @@ func TestUserService_DeleteUser_DeletesAndRevokesSessions(t *testing.T) {
 		}
 		var revoked []uuid.UUID
 		sessions := &fakeSessionRevoker{RevokeUserSessionsFunc: recordRevokes(&revoked)}
+		audit := &fakeRecorder{}
 
-		err := newTestService(t, UserServiceParams{Repo: repo, Sessions: sessions}).DeleteUser(asManager(), userID)
+		err := newTestService(t, UserServiceParams{Repo: repo, Sessions: sessions, Audit: audit}).DeleteUser(asManager(), userID)
 
 		if err != nil {
 			t.Fatalf("DeleteUser() error = %v", err)
@@ -546,6 +579,10 @@ func TestUserService_DeleteUser_DeletesAndRevokesSessions(t *testing.T) {
 
 		if !slices.Equal(sessions.invalidated, []uuid.UUID{userID}) {
 			t.Errorf("invalidated users = %v, want [%v]", sessions.invalidated, userID)
+		}
+
+		if len(audit.entries) != 1 || audit.entries[0].Action != "delete" || audit.entries[0].EntityID != userID.String() {
+			t.Errorf("audit entries = %+v, want one delete of %v", audit.entries, userID)
 		}
 	})
 

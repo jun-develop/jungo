@@ -5,11 +5,25 @@
 package sqlc
 
 import (
+	"encoding/json"
 	"net/netip"
 	"time"
 
 	"github.com/google/uuid"
 )
+
+type AuditLog struct {
+	ID        int64     `db:"id" json:"id"`
+	CreatedAt time.Time `db:"created_at" json:"created_at"`
+	// UUID of the logged-in user; NULL for a console command
+	ActorID    *string `db:"actor_id" json:"actor_id"`
+	Action     string  `db:"action" json:"action"`
+	EntityType string  `db:"entity_type" json:"entity_type"`
+	EntityID   string  `db:"entity_id" json:"entity_id"`
+	// New values of what changed, as the service recorded them; never secrets
+	Changes json.RawMessage `db:"changes" json:"changes"`
+	TraceID *string         `db:"trace_id" json:"trace_id"`
+}
 
 type AuthToken struct {
 	ID     int64     `db:"id" json:"id"`

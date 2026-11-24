@@ -25,8 +25,8 @@ package service
 // 9   TestAccessService_IsPermission_ReportsCodesFeaturesUse                         Empty code                                  false
 // 10  TestAccessService_ListPermissionGroups_GroupsDatabasePermissions               Permissions in two groups                   One group per group code
 // 11  TestAccessService_ListPermissionGroups_GroupsDatabasePermissions               Permissions unreadable                      Database error
-// 12  TestAccessService_CreateRole_CreatesAndGrantsPermissions                       With users:read                             Created, name trimmed; users:read granted
-// 13  TestAccessService_CreateRole_CreatesAndGrantsPermissions                       Without permissions                         Created; nothing granted
+// 12  TestAccessService_CreateRole_CreatesAndGrantsPermissions                       With users:read                             Created, name trimmed; users:read granted; one audit entry
+// 13  TestAccessService_CreateRole_CreatesAndGrantsPermissions                       Without permissions                         Created; nothing granted; one audit entry
 // 14  TestAccessService_CreateRole_RejectsInvalidCode                                Empty code                                  ErrInvalidRoleCode
 // 15  TestAccessService_CreateRole_RejectsInvalidCode                                Upper-case letter                           ErrInvalidRoleCode
 // 16  TestAccessService_CreateRole_RejectsInvalidCode                                Dash                                        ErrInvalidRoleCode
@@ -41,13 +41,13 @@ package service
 // 25  TestAccessService_GetRole_LooksUpOneRoleWithUserCount                          Roles unreadable                            Database error
 // 26  TestAccessService_ListRoles_ListsEveryRoleWithUserCounts                       Two roles                                   Asks for every role, with user counts
 // 27  TestAccessService_ListRoles_ListsEveryRoleWithUserCounts                       Roles unreadable                            Database error
-// 28  TestAccessService_RenameRole_UpdatesTrimmedName                                Name with surrounding spaces                Role's name updated, trimmed
+// 28  TestAccessService_RenameRole_UpdatesTrimmedName                                Name with surrounding spaces                Role's name updated, trimmed; one audit entry
 // 29  TestAccessService_RenameRole_RejectsInvalidChanges                             Blank name                                  ErrInvalidRoleName
 // 30  TestAccessService_RenameRole_RejectsInvalidChanges                             Unknown role                                ErrRoleNotFound
 // 31  TestAccessService_RenameRole_RejectsInvalidChanges                             System role                                 ErrSystemRole
 // 32  TestAccessService_RenameRole_RejectsInvalidChanges                             Role holding a permission the actor lacks   ErrEscalation
 // 33  TestAccessService_RenameRole_RejectsInvalidChanges                             Lock fails                                  Database error
-// 34  TestAccessService_ReplaceRolePermissions_StoresSortedCodesAndInvalidatesUsers  Codes unsorted, duplicated                  Stored sorted once; role's users invalidated
+// 34  TestAccessService_ReplaceRolePermissions_StoresSortedCodesAndInvalidatesUsers  Codes unsorted, duplicated                  Stored sorted once; role's users invalidated; one audit entry
 // 35  TestAccessService_ReplaceRolePermissions_ChecksEveryChange                     In the database, unused by the code         Allowed
 // 36  TestAccessService_ReplaceRolePermissions_ChecksEveryChange                     Used by the code, not in the database       ErrUnknownPermission
 // 37  TestAccessService_ReplaceRolePermissions_ChecksEveryChange                     Add a held one beside an unheld one         Allowed
@@ -56,7 +56,7 @@ package service
 // 40  TestAccessService_ReplaceRolePermissions_ChecksEveryChange                     System role                                 ErrSystemRole
 // 41  TestAccessService_ReplaceRolePermissions_ChecksEveryChange                     Unknown role                                ErrRoleNotFound
 // 42  TestAccessService_ReplaceRolePermissions_ChecksEveryChange                     roles:update lost since the request         actor.ErrForbidden
-// 43  TestAccessService_DeleteRole_DeletesAndInvalidatesUsers                        Role held by one user                       Role deleted; that user invalidated
+// 43  TestAccessService_DeleteRole_DeletesAndInvalidatesUsers                        Role held by one user                       Role deleted; that user invalidated; one audit entry
 // 44  TestAccessService_DeleteRole_InvalidatesEveryoneWhenRoleHasManyUsers           Exactly 100 users                           Each user invalidated
 // 45  TestAccessService_DeleteRole_InvalidatesEveryoneWhenRoleHasManyUsers           101 users                                   Everyone invalidated at once
 // 46  TestAccessService_DeleteRole_RejectsInvalidChanges                             System role                                 ErrSystemRole
@@ -65,8 +65,8 @@ package service
 // 49  TestAccessService_ListUserRoles_ReturnsRolesOfTheUser                          Known user                                  Asks for that user's roles
 // 50  TestAccessService_ListUserRoles_ReturnsRolesOfTheUser                          Unknown user                                ErrUserNotFound
 // 51  TestAccessService_ListUserRoles_ReturnsRolesOfTheUser                          User roles unreadable                       Database error
-// 52  TestAccessService_SetUserRoles_ReplacesRolesAndInvalidatesUser                 Assign manager and extra (extra twice)      Each stored once; user invalidated
-// 53  TestAccessService_SetUserRoles_ReplacesRolesAndInvalidatesUser                 Clear a super_admin + manager user          No role stored; super_admin not checked
+// 52  TestAccessService_SetUserRoles_ReplacesRolesAndInvalidatesUser                 Assign manager and extra (extra twice)      Each stored once; user invalidated; one audit entry
+// 53  TestAccessService_SetUserRoles_ReplacesRolesAndInvalidatesUser                 Clear a super_admin + manager user          No role stored; super_admin not checked; one audit entry
 // 54  TestAccessService_SetUserRoles_RejectsInvalidChanges                           Actor changes their own roles               ErrCannotChangeOwnRoles
 // 55  TestAccessService_SetUserRoles_RejectsInvalidChanges                           Unknown role                                ErrRoleNotFound
 // 56  TestAccessService_SetUserRoles_RejectsInvalidChanges                           Unknown user                                ErrUserNotFound
@@ -263,7 +263,9 @@ func TestAccessService_CreateRole_CreatesAndGrantsPermissions(t *testing.T) {
 			}
 			input := domain.CreateRoleInput{Code: "extra", Name: "  Extra  ", Permissions: tt.permissions}
 
-			role, err := newTestService(t, AccessServiceParams{Repo: repo}).
+			audit := &fakeRecorder{}
+
+			role, err := newTestService(t, AccessServiceParams{Repo: repo, Audit: audit}).
 				CreateRole(asActor(domain.RolesCreate), input)
 
 			if err != nil {
@@ -289,6 +291,8 @@ func TestAccessService_CreateRole_CreatesAndGrantsPermissions(t *testing.T) {
 			if !slices.Equal(role.Permissions, tt.permissions) {
 				t.Errorf("CreateRole() permissions = %v, want the reloaded role's %v", role.Permissions, tt.permissions)
 			}
+
+			wantEntry(t, audit, "create", "roles", extraUUID)
 		})
 	}
 }
@@ -476,7 +480,8 @@ func TestAccessService_RenameRole_UpdatesTrimmedName(t *testing.T) {
 			return nil
 		},
 	}
-	s := newTestService(t, AccessServiceParams{Repo: repo})
+	audit := &fakeRecorder{}
+	s := newTestService(t, AccessServiceParams{Repo: repo, Audit: audit})
 
 	_, err := s.RenameRole(asActor(domain.RolesUpdate), managerUUID, "  Team Lead  ")
 
@@ -491,6 +496,8 @@ func TestAccessService_RenameRole_UpdatesTrimmedName(t *testing.T) {
 	if gotName != "Team Lead" {
 		t.Errorf("new name = %q, want %q (trimmed)", gotName, "Team Lead")
 	}
+
+	wantEntry(t, audit, "update", "roles", managerUUID)
 }
 
 func TestAccessService_RenameRole_RejectsInvalidChanges(t *testing.T) {
@@ -556,9 +563,10 @@ func TestAccessService_ReplaceRolePermissions_StoresSortedCodesAndInvalidatesUse
 		},
 	}
 	cache := &fakeCache{}
+	audit := &fakeRecorder{}
 	codes := []string{usersUpdate, usersRead, usersRead}
 
-	_, err := newTestService(t, AccessServiceParams{Repo: repo, Cache: cache}).
+	_, err := newTestService(t, AccessServiceParams{Repo: repo, Cache: cache, Audit: audit}).
 		ReplaceRolePermissions(asActor(domain.RolesUpdate), managerUUID, codes)
 
 	if err != nil {
@@ -580,6 +588,8 @@ func TestAccessService_ReplaceRolePermissions_StoresSortedCodesAndInvalidatesUse
 	if !slices.Equal(cache.users, []int64{targetID}) {
 		t.Errorf("invalidated users = %v, want [%d]", cache.users, targetID)
 	}
+
+	wantEntry(t, audit, "update", "roles", managerUUID)
 }
 
 func TestAccessService_ReplaceRolePermissions_ChecksEveryChange(t *testing.T) {
@@ -687,8 +697,9 @@ func TestAccessService_DeleteRole_DeletesAndInvalidatesUsers(t *testing.T) {
 		},
 	}
 	cache := &fakeCache{}
+	audit := &fakeRecorder{}
 
-	err := newTestService(t, AccessServiceParams{Repo: repo, Cache: cache}).
+	err := newTestService(t, AccessServiceParams{Repo: repo, Cache: cache, Audit: audit}).
 		DeleteRole(asActor(domain.RolesDelete), managerUUID)
 
 	if err != nil {
@@ -706,6 +717,8 @@ func TestAccessService_DeleteRole_DeletesAndInvalidatesUsers(t *testing.T) {
 	if !slices.Equal(cache.users, []int64{targetID}) {
 		t.Errorf("invalidated users = %v, want [%d]", cache.users, targetID)
 	}
+
+	wantEntry(t, audit, "delete", "roles", managerUUID)
 }
 
 func TestAccessService_DeleteRole_InvalidatesEveryoneWhenRoleHasManyUsers(t *testing.T) {
@@ -874,8 +887,9 @@ func TestAccessService_SetUserRoles_ReplacesRolesAndInvalidatesUser(t *testing.T
 				},
 			}
 			cache := &fakeCache{}
+			audit := &fakeRecorder{}
 
-			_, err := newTestService(t, AccessServiceParams{Repo: repo, Cache: cache}).
+			_, err := newTestService(t, AccessServiceParams{Repo: repo, Cache: cache, Audit: audit}).
 				SetUserRoles(asActor(domain.RolesAssign), targetUUID, tt.wanted)
 
 			if err != nil {
@@ -893,6 +907,8 @@ func TestAccessService_SetUserRoles_ReplacesRolesAndInvalidatesUser(t *testing.T
 			if !slices.Equal(cache.users, []int64{targetID}) {
 				t.Errorf("invalidated users = %v, want [%d]", cache.users, targetID)
 			}
+
+			wantEntry(t, audit, "set_roles", "users", targetUUID)
 		})
 	}
 }

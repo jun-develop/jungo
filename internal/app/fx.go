@@ -24,11 +24,13 @@ import (
 	"github.com/jun-develop/junkit/telegram"
 	"github.com/jun-develop/junkit/validation"
 
+	"jungo/internal/common/auditlog"
 	"jungo/internal/config"
 	"jungo/internal/console"
 	"jungo/internal/console/commands"
 	"jungo/internal/database/primary"
 	"jungo/internal/features/access"
+	"jungo/internal/features/audit"
 	"jungo/internal/features/auth"
 	"jungo/internal/features/user"
 	"jungo/internal/middleware"
@@ -98,8 +100,14 @@ func CoreModules(cfg *config.Config) []fx.Option {
 		mailer.Module,
 
 		// =====================================================================
+		// COMMON FEATURES
+		// =====================================================================
+		fx.Provide(provideAuditRecorder),
+
+		// =====================================================================
 		// FEATURES
 		// =====================================================================
+		audit.Module,
 		access.Module,
 		auth.Module,
 		user.Module,
@@ -192,10 +200,27 @@ func fxErrorsOnly() fx.Option {
 	})
 }
 
+// auditRecorderParams takes the Recorder audit.Module provides under the name "audit", if loaded.
+type auditRecorderParams struct {
+	fx.In
+
+	Recorder auditlog.Recorder `name:"audit" optional:"true"`
+}
+
+// provideAuditRecorder gives the features the audit feature's Recorder, or auditlog.Nop when
+// audit.Module is removed, so the features that record need no change.
+func provideAuditRecorder(p auditRecorderParams) auditlog.Recorder {
+	if p.Recorder == nil {
+		return auditlog.Nop{}
+	}
+
+	return p.Recorder
+}
+
 // provideGin initializes the Gin engine with trusted proxies.
 func provideGin(cfg *config.Config) (*gin.Engine, error) {
 	r := gin.New()
-	// security.GetIdentity(c) reads the request context through *gin.Context.
+
 	r.ContextWithFallback = true
 	if err := r.SetTrustedProxies(cfg.Security.TrustedProxies); err != nil {
 		return nil, fmt.Errorf("SECURITY_TRUSTED_PROXIES: %w", err)
@@ -225,14 +250,12 @@ func provideLoggers(cfg *config.Config) []fx.Option {
 	return logger.ProvideNamed(defs, shared)
 }
 
-// provideValidationOptions builds validation.Options; the disposable-email blocklist is the
-// embedded seed.
+// provideValidationOptions builds validation.Options; the disposable-email blocklist is the embedded seed.
 func provideValidationOptions() validation.Options {
 	return validation.Options{}
 }
 
-// provideSecurityOptions builds security.Options from cfg.Auth; development falls back
-// to random keys.
+// provideSecurityOptions builds security.Options from cfg.Auth; development falls back to random keys.
 func provideSecurityOptions(cfg *config.Config, log *zap.Logger) (security.Options, error) {
 	opts := security.Options{Password: security.PasswordOptions{Cost: cfg.Auth.PasswordCost}}
 

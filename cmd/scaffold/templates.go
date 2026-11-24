@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/jun-develop/junkit/scaffold"
+	"github.com/jun-develop/junkit/stringx"
 )
 
 // featureFiles returns the list of files to generate for a new feature.
@@ -50,11 +51,11 @@ func fill(tmpl string, data scaffold.FeatureData) string {
 	nameWords := strings.ReplaceAll(data.Name, "_", " ")
 
 	return alignOverview(strings.NewReplacer(
-		"PASCAL_PLURAL", pascal(data.Plural),
+		"PASCAL_PLURAL", stringx.ToPascal(data.Plural),
 		"TABLE_UPPER", strings.ToUpper(data.Table),
-		"NAME_WORDS", capitalize(nameWords),
+		"NAME_WORDS", stringx.UpperFirst(nameWords),
 		"PLURAL_WORDS", pluralWords,
-		"PLURAL_TITLE", capitalize(pluralWords),
+		"PLURAL_TITLE", stringx.UpperFirst(pluralWords),
 		"{{.Pascal}}", data.Pascal,
 		"{{.Name}}", data.Name,
 		"@@", "`",
@@ -102,25 +103,6 @@ func alignOverview(text string) string {
 	}
 
 	return strings.Join(lines, "\n")
-}
-
-// pascal converts snake_case to PascalCase ("order_items" -> "OrderItems").
-func pascal(snake string) string {
-	parts := strings.Split(snake, "_")
-	for i, p := range parts {
-		parts[i] = capitalize(p)
-	}
-
-	return strings.Join(parts, "")
-}
-
-// capitalize upper-cases the first letter of an ASCII word.
-func capitalize(s string) string {
-	if s == "" {
-		return s
-	}
-
-	return strings.ToUpper(s[:1]) + s[1:]
 }
 
 const migrationUpTmpl = `-- =============================================================================

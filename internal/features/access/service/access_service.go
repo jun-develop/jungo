@@ -13,6 +13,7 @@ import (
 	"github.com/jun-develop/junkit/slicex"
 
 	"jungo/internal/common/actor"
+	"jungo/internal/common/auditlog"
 	"jungo/internal/features/access/domain"
 )
 
@@ -30,6 +31,7 @@ type AccessServiceParams struct {
 	Repo  domain.AccessRepository
 	Users domain.UserLookup
 	Cache domain.PermissionCache
+	Audit auditlog.Recorder
 
 	Permissions []string `group:"permissions"`
 }
@@ -39,12 +41,13 @@ type AccessService struct {
 	repo        domain.AccessRepository
 	users       domain.UserLookup
 	cache       domain.PermissionCache
+	audit       auditlog.Recorder
 	permissions []string
 }
 
 // NewAccessService creates an AccessService.
 func NewAccessService(p AccessServiceParams) *AccessService {
-	return &AccessService{repo: p.Repo, users: p.Users, cache: p.Cache, permissions: p.Permissions}
+	return &AccessService{repo: p.Repo, users: p.Users, cache: p.Cache, audit: p.Audit, permissions: p.Permissions}
 }
 
 // Permissions returns the permission codes granted to a user through their roles.
@@ -120,11 +123,13 @@ func (s *AccessService) CreateRole(ctx context.Context, input domain.CreateRoleI
 			return err
 		}
 
-		if len(codes) == 0 {
-			return nil
+		if len(codes) > 0 {
+			if err := s.repo.ReplaceRolePermissions(ctx, role.ID, codes); err != nil {
+				return err
+			}
 		}
 
-		return s.repo.ReplaceRolePermissions(ctx, role.ID, codes)
+		return s.recordAudit(ctx, auditlog.ActionCreate, "roles", role.UUID, map[string]any{"code": input.Code, "name": name, "permissions": codes})
 	})
 	if err != nil {
 		return nil, err
@@ -161,7 +166,11 @@ func (s *AccessService) RenameRole(ctx context.Context, uid uuid.UUID, name stri
 			return err
 		}
 
-		return s.repo.UpdateRoleName(ctx, role.ID, name)
+		if err := s.repo.UpdateRoleName(ctx, role.ID, name); err != nil {
+			return err
+		}
+
+		return s.recordAudit(ctx, auditlog.ActionUpdate, "roles", uid, map[string]any{"name": name})
 	})
 	if err != nil {
 		return nil, err
@@ -193,6 +202,10 @@ func (s *AccessService) ReplaceRolePermissions(ctx context.Context, uid uuid.UUI
 		}
 
 		if err := s.repo.ReplaceRolePermissions(ctx, role.ID, codes); err != nil {
+			return err
+		}
+
+		if err := s.recordAudit(ctx, auditlog.ActionUpdate, "roles", uid, map[string]any{"permissions": codes}); err != nil {
 			return err
 		}
 
@@ -228,7 +241,11 @@ func (s *AccessService) DeleteRole(ctx context.Context, uid uuid.UUID) error {
 			return err
 		}
 
-		return s.repo.DeleteRole(ctx, role.ID)
+		if err := s.repo.DeleteRole(ctx, role.ID); err != nil {
+			return err
+		}
+
+		return s.recordAudit(ctx, auditlog.ActionDelete, "roles", uid, nil)
 	})
 	if err != nil {
 		return err
@@ -282,8 +299,15 @@ func (s *AccessService) SetUserRoles(ctx context.Context, userUUID uuid.UUID, ro
 		}
 
 		ids := slicex.Map(wanted, func(r *domain.Role) int64 { return r.ID })
+		if err := s.repo.ReplaceUserRoles(ctx, userID, ids); err != nil {
+			return err
+		}
 
-		return s.repo.ReplaceUserRoles(ctx, userID, ids)
+		roles := slicex.Map(wanted, func(r *domain.Role) string {
+			return r.Code
+		})
+
+		return s.recordAudit(ctx, "set_roles", "users", userUUID, map[string]any{"roles": roles})
 	})
 	if err != nil {
 		return nil, err
@@ -292,6 +316,11 @@ func (s *AccessService) SetUserRoles(ctx context.Context, userUUID uuid.UUID, ro
 	s.cache.InvalidateUsers(ctx, userID)
 
 	return s.repo.ListUserRoles(ctx, userID)
+}
+
+// recordAudit writes a change of the row uid of entityType to the audit log, in the caller's transaction.
+func (s *AccessService) recordAudit(ctx context.Context, action, entityType string, uid uuid.UUID, changes map[string]any) error {
+	return s.audit.Record(ctx, auditlog.Entry{Action: action, EntityType: entityType, EntityID: uid.String(), Changes: changes})
 }
 
 // lockUserRoleChange locks every role a change of the user's roles to roleUUIDs touches, then

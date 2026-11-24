@@ -694,6 +694,7 @@ to a command.
 make console CMD="health:check"
 make console CMD="db:migrate"
 make console CMD="auth:cleanup-tokens" ARGS="-retention=72h"
+make console CMD="audit:cleanup-logs"
 ```
 
 `go run ./cmd/console <command>` also works on the host, but nothing loads `.env` there: export the
@@ -850,6 +851,26 @@ them, and review checks them.
   more than once. The transaction travels in `ctx`, so repositories of other features called inside
   join it. Invalidate caches after the commit, never inside. Login and refresh, which must lock and
   decide in one round trip, are PL/pgSQL functions (`database/primary/functions/`).
+- **Audit log**: a change worth a history is recorded with `auditlog.Recorder`
+  (`internal/common/auditlog`), inside the transaction that makes it, so both commit or neither.
+  The entry gets the logged-in user and the trace ID from `ctx`; `Changes` holds the new values and
+  never a secret; for a partial-update input, `auditlog.Changes(input)` builds it from the fields
+  set (tag a secret field `audit:"-"`). Users and roles are recorded today; admins with
+  `audit_logs:read` read the entries at `GET /api/v1/audit-logs?entity_type=users&entity_id=<uuid>`
+  (or `actor_id=`). The audit feature is optional: remove `audit.Module` from `internal/app/fx.go`
+  and the app gives the features `auditlog.Nop`, a Recorder that records nothing; no feature changes.
+
+  ```go
+  err := s.repo.WithTransaction(ctx, func(ctx context.Context) error {
+  	if err := s.repo.Rename(ctx, id, name); err != nil {
+  		return err
+  	}
+  	return s.audit.Record(ctx, auditlog.Entry{
+  		Action: auditlog.ActionUpdate, EntityType: "orders", EntityID: id.String(),
+  		Changes: map[string]any{"name": name},
+  	})
+  })
+  ```
 - **Errors**: repositories wrap database errors as `"<feature> repository: <operation>: %w"` via
   `var wrap = database.ErrorPrefixer("<feature> repository")` (junkit);
   domain errors stay matchable with `errors.Is/As`. Log an error in one place only, and never drop
@@ -1148,7 +1169,7 @@ API.
 **Convention:** the packages the app wires through Fx (`logger`, `database/postgres`, `i18n`,
 `response`, `validation`, `security`, `cache`, `storage`, `telegram`, `notification`, `recaptcha`,
 `mailer`) expose a `var Module` (or a constructor) for one-line registration — see
-`internal/app/fx.go`. The others are used directly: `pagination`, `slicex`, `sqlfmt`, `upload` and
+`internal/app/fx.go`. The others are used directly: `pagination`, `slicex`, `stringx`, `sqlfmt`, `upload` and
 `console` are plain functions; `middleware` constructors are called where routes are registered,
 because call sites need differently configured instances (e.g. `Limiter` per route group);
 `tracer` is called from code; `scaffold` is a build-time dependency of `cmd/scaffold` only.

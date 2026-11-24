@@ -5,7 +5,8 @@ package service
 // =============================================================================
 //
 // File: fakes_test.go
-// Purpose: Func-field fakes for AccessService (repository, user lookup, permission cache), the
+// Purpose: Func-field fakes for AccessService (repository, user lookup, permission cache, audit
+//          recorder), the
 //          roles and users the tests use, answer builders, and a constructor for the service.
 // Used by: access_service_test.go
 //
@@ -20,6 +21,7 @@ import (
 	"github.com/google/uuid"
 
 	"jungo/internal/common/actor"
+	"jungo/internal/common/auditlog"
 	"jungo/internal/features/access/domain"
 )
 
@@ -170,6 +172,30 @@ func (r *fakeRepository) LockUser(ctx context.Context, uid uuid.UUID) (int64, er
 	return r.LockUserFunc(ctx, uid)
 }
 
+// fakeRecorder is an auditlog.Recorder that keeps every entry.
+type fakeRecorder struct {
+	entries []auditlog.Entry
+}
+
+// Record keeps e.
+func (f *fakeRecorder) Record(_ context.Context, e auditlog.Entry) error {
+	f.entries = append(f.entries, e)
+	return nil
+}
+
+// wantEntry fails the test unless f kept exactly one entry: action on the row id of entityType.
+func wantEntry(t *testing.T, f *fakeRecorder, action, entityType string, id uuid.UUID) {
+	t.Helper()
+
+	if len(f.entries) != 1 {
+		t.Fatalf("audit entries = %+v, want one %s", f.entries, action)
+	}
+
+	if e := f.entries[0]; e.Action != action || e.EntityType != entityType || e.EntityID != id.String() {
+		t.Errorf("audit entry = %+v, want %s of %s %v", e, action, entityType, id)
+	}
+}
+
 // fakeCache is a domain.PermissionCache that never caches: GetOrLoad always loads, unless loadErr
 // is set. It records every invalidation.
 type fakeCache struct {
@@ -267,6 +293,10 @@ func newTestService(t *testing.T, p AccessServiceParams) *AccessService {
 
 	if p.Permissions == nil {
 		p.Permissions = allPermissions
+	}
+
+	if p.Audit == nil {
+		p.Audit = &fakeRecorder{}
 	}
 
 	return NewAccessService(p)

@@ -6,8 +6,8 @@ package service
 //
 // File: fakes_test.go
 // Purpose: Func-field fakes for UserService's dependencies (repository, permission reader,
-//          storage, session revoker, password hasher), answer builders, and a constructor for the
-//          service.
+//          storage, session revoker, password hasher, audit recorder), answer builders, and a
+//          constructor for the service.
 // Used by: user_service_test.go
 //
 // =============================================================================
@@ -25,6 +25,7 @@ import (
 	"github.com/jun-develop/junkit/security"
 
 	"jungo/internal/common/actor"
+	"jungo/internal/common/auditlog"
 	"jungo/internal/features/user/domain"
 )
 
@@ -193,6 +194,23 @@ func (f *fakeSessionRevoker) InvalidateUserSessions(_ context.Context, uid uuid.
 	f.invalidated = append(f.invalidated, uid)
 }
 
+// fakeRecorder is an auditlog.Recorder that keeps every entry, or fails with err when set.
+type fakeRecorder struct {
+	entries []auditlog.Entry
+	err     error
+}
+
+// Record keeps e, or returns err.
+func (f *fakeRecorder) Record(_ context.Context, e auditlog.Entry) error {
+	if f.err != nil {
+		return f.err
+	}
+
+	f.entries = append(f.entries, e)
+
+	return nil
+}
+
 // recordRevokes is a RevokeUserSessionsFunc that appends every user whose sessions are revoked
 // to got.
 func recordRevokes(got *[]uuid.UUID) func(context.Context, uuid.UUID) error {
@@ -261,6 +279,10 @@ func newTestService(t *testing.T, p UserServiceParams) *UserService {
 
 	if p.Sessions == nil {
 		p.Sessions = &fakeSessionRevoker{}
+	}
+
+	if p.Audit == nil {
+		p.Audit = &fakeRecorder{}
 	}
 
 	if p.Hasher == nil {

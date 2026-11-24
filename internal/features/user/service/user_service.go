@@ -13,6 +13,7 @@ import (
 	"github.com/jun-develop/junkit/tracer"
 
 	"jungo/internal/common/actor"
+	"jungo/internal/common/auditlog"
 	"jungo/internal/features/user/domain"
 )
 
@@ -25,6 +26,7 @@ type UserServiceParams struct {
 	Storage     storage.Service
 	Hasher      security.PasswordHasher
 	Sessions    domain.SessionRevoker
+	Audit       auditlog.Recorder
 	Logger      *zap.Logger
 }
 
@@ -35,6 +37,7 @@ type UserService struct {
 	storage     storage.Service
 	hasher      security.PasswordHasher
 	sessions    domain.SessionRevoker
+	audit       auditlog.Recorder
 	logger      *zap.Logger
 }
 
@@ -46,6 +49,7 @@ func NewUserService(p UserServiceParams) *UserService {
 		storage:     p.Storage,
 		hasher:      p.Hasher,
 		sessions:    p.Sessions,
+		audit:       p.Audit,
 		logger:      p.Logger,
 	}
 }
@@ -65,7 +69,22 @@ func (s *UserService) CreateUser(ctx context.Context, input domain.CreateUserInp
 		return nil, err
 	}
 
-	return s.repo.Create(ctx, input, passwordHash)
+	var user *domain.User
+	err = s.repo.WithTransaction(ctx, func(ctx context.Context) error {
+		if user, err = s.repo.Create(ctx, input, passwordHash); err != nil {
+			return err
+		}
+
+		return s.recordAudit(ctx, auditlog.ActionCreate, user.UUID, map[string]any{
+			"email": user.Email, "first_name": user.FirstName, "last_name": user.LastName,
+		})
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	return user, nil
 }
 
 // GetUser returns a user by UUID to the user themself or a holder of users:read; anyone else
@@ -115,6 +134,10 @@ func (s *UserService) UpdateUser(ctx context.Context, uid uuid.UUID, input domai
 			return err
 		}
 
+		if err := s.recordAudit(ctx, auditlog.ActionUpdate, uid, auditlog.Changes(input)); err != nil {
+			return err
+		}
+
 		if user.IsActive() {
 			return nil
 		}
@@ -151,6 +174,10 @@ func (s *UserService) DeleteUser(ctx context.Context, uid uuid.UUID) error {
 		}
 
 		if err := s.repo.Delete(ctx, uid); err != nil {
+			return err
+		}
+
+		if err := s.recordAudit(ctx, auditlog.ActionDelete, uid, nil); err != nil {
 			return err
 		}
 
@@ -303,4 +330,9 @@ func (s *UserService) deleteFile(ctx context.Context, fileURL string) {
 	if err := s.storage.DeleteFile(ctx, fileURL); err != nil {
 		s.logger.Error("user: delete stored file failed", zap.String("file_url", fileURL), zap.Error(err))
 	}
+}
+
+// recordAudit writes a change of the user uid to the audit log, in the caller's transaction.
+func (s *UserService) recordAudit(ctx context.Context, action string, uid uuid.UUID, changes map[string]any) error {
+	return s.audit.Record(ctx, auditlog.Entry{Action: action, EntityType: "users", EntityID: uid.String(), Changes: changes})
 }
