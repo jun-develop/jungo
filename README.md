@@ -853,21 +853,27 @@ them, and review checks them.
   decide in one round trip, are PL/pgSQL functions (`database/primary/functions/`).
 - **Audit log**: a change worth a history is recorded with `auditlog.Recorder`
   (`internal/common/auditlog`), inside the transaction that makes it, so both commit or neither.
-  The entry gets the logged-in user and the trace ID from `ctx`; `Changes` holds the new values and
-  never a secret; for a partial-update input, `auditlog.Changes(input)` builds it from the fields
-  set (tag a secret field `audit:"-"`). Users and roles are recorded today; admins with
-  `audit_logs:read` read the entries at `GET /api/v1/audit-logs?entity_type=users&entity_id=<uuid>`
-  (or `actor_id=`). The audit feature is optional: remove `audit.Module` from `internal/app/fx.go`
-  and the app gives the features `auditlog.Nop`, a Recorder that records nothing; no feature changes.
+  The entry gets the logged-in user and the trace ID from `ctx`. Pass the row's values as `Before`
+  (nil for a create) and `After` (nil for a delete), never a secret; the log stores each value that
+  changed as `{"name": {"before": "Old", "after": "New"}}`. For a partial-update input,
+  `auditlog.Changes(input)` builds `After` from the fields set (tag a secret field `audit:"-"`).
+  Users and roles are recorded today; admins with `audit_logs:read` read the entries at
+  `GET /api/v1/audit-logs?entity_type=users&entity_id=<uuid>` (or `actor_id=`).
+  The audit feature is optional: remove `audit.Module` from `internal/app/fx.go` and the app gives
+  the features `auditlog.Nop`, a Recorder that records nothing; no feature changes.
 
   ```go
   err := s.repo.WithTransaction(ctx, func(ctx context.Context) error {
+  	order, err := s.repo.GetForUpdate(ctx, id) // locked: the values this change replaces
+  	if err != nil {
+  		return err
+  	}
   	if err := s.repo.Rename(ctx, id, name); err != nil {
   		return err
   	}
   	return s.audit.Record(ctx, auditlog.Entry{
   		Action: auditlog.ActionUpdate, EntityType: "orders", EntityID: id.String(),
-  		Changes: map[string]any{"name": name},
+  		Before: map[string]any{"name": order.Name}, After: map[string]any{"name": name},
   	})
   })
   ```

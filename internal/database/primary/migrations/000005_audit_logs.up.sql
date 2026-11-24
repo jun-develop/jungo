@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 );
 
 COMMENT ON COLUMN audit_logs.actor_id IS 'UUID of the logged-in user; NULL for a console command';
-COMMENT ON COLUMN audit_logs.changes IS 'New values of what changed, as the service recorded them; never secrets';
+COMMENT ON COLUMN audit_logs.changes IS '{column: {"before": ..., "after": ...}} for each value changed; never secrets';
 
 -- Lists page newest first within an entity or an actor; created_at alone serves audit:cleanup-logs.
 CREATE INDEX IF NOT EXISTS idx_audit_logs_entity ON audit_logs (entity_type, entity_id, created_at DESC, id DESC);

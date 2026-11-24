@@ -75,9 +75,7 @@ func (s *UserService) CreateUser(ctx context.Context, input domain.CreateUserInp
 			return err
 		}
 
-		return s.recordAudit(ctx, auditlog.ActionCreate, user.UUID, map[string]any{
-			"email": user.Email, "first_name": user.FirstName, "last_name": user.LastName,
-		})
+		return s.recordAudit(ctx, auditlog.ActionCreate, user.UUID, nil, auditFields(user))
 	})
 
 	if err != nil {
@@ -130,11 +128,20 @@ func (s *UserService) UpdateUser(ctx context.Context, uid uuid.UUID, input domai
 			return domain.ErrCannotChangeOwnStatus
 		}
 
+		if _, err := s.repo.LockByUUID(ctx, uid); err != nil {
+			return err
+		}
+
+		before, err := s.repo.GetByUUID(ctx, uid)
+		if err != nil {
+			return err
+		}
+
 		if user, err = s.repo.Update(ctx, uid, input); err != nil {
 			return err
 		}
 
-		if err := s.recordAudit(ctx, auditlog.ActionUpdate, uid, auditlog.Changes(input)); err != nil {
+		if err := s.recordAudit(ctx, auditlog.ActionUpdate, uid, auditFields(before), auditlog.Changes(input)); err != nil {
 			return err
 		}
 
@@ -177,7 +184,7 @@ func (s *UserService) DeleteUser(ctx context.Context, uid uuid.UUID) error {
 			return err
 		}
 
-		if err := s.recordAudit(ctx, auditlog.ActionDelete, uid, nil); err != nil {
+		if err := s.recordAudit(ctx, auditlog.ActionDelete, uid, auditFields(user), nil); err != nil {
 			return err
 		}
 
@@ -333,6 +340,14 @@ func (s *UserService) deleteFile(ctx context.Context, fileURL string) {
 }
 
 // recordAudit writes a change of the user uid to the audit log, in the caller's transaction.
-func (s *UserService) recordAudit(ctx context.Context, action string, uid uuid.UUID, changes map[string]any) error {
-	return s.audit.Record(ctx, auditlog.Entry{Action: action, EntityType: "users", EntityID: uid.String(), Changes: changes})
+func (s *UserService) recordAudit(ctx context.Context, action string, uid uuid.UUID, before, after map[string]any) error {
+	return s.audit.Record(ctx, auditlog.Entry{Action: action, EntityType: "users", EntityID: uid.String(), Before: before, After: after})
+}
+
+// auditFields returns the user's values the audit log records, by column name.
+func auditFields(u *domain.User) map[string]any {
+	return map[string]any{
+		"email": u.Email, "first_name": u.FirstName, "last_name": u.LastName,
+		"phone_number": u.PhoneNumber, "avatar_url": u.AvatarURL, "status": u.Status,
+	}
 }

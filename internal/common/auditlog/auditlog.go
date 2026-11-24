@@ -14,7 +14,8 @@ type Entry struct {
 	Action     string
 	EntityType string
 	EntityID   string
-	Changes    map[string]any
+	Before     map[string]any
+	After      map[string]any
 }
 
 // Recorder writes entries to the audit log.
