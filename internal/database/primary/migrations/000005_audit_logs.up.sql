@@ -7,7 +7,7 @@
 CREATE TABLE IF NOT EXISTS audit_logs (
     id          BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    actor_id    VARCHAR(64),
+    actor_uuid  UUID,
     action      VARCHAR(50) NOT NULL,
     entity_type VARCHAR(63) NOT NULL,
     entity_id   VARCHAR(64) NOT NULL,
@@ -15,12 +15,12 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     trace_id    VARCHAR(64)
 );
 
-COMMENT ON COLUMN audit_logs.actor_id IS 'UUID of the logged-in user; NULL for a console command';
+COMMENT ON COLUMN audit_logs.actor_uuid IS 'UUID of the logged-in user; NULL for a console command';
 COMMENT ON COLUMN audit_logs.changes IS '{column: {"before": ..., "after": ...}} for each value changed; never secrets';
 
 -- Lists page newest first within an entity or an actor; created_at alone serves audit:cleanup-logs.
 CREATE INDEX IF NOT EXISTS idx_audit_logs_entity ON audit_logs (entity_type, entity_id, created_at DESC, id DESC);
-CREATE INDEX IF NOT EXISTS idx_audit_logs_actor ON audit_logs (actor_id, created_at DESC, id DESC) WHERE actor_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_audit_logs_actor ON audit_logs (actor_uuid, created_at DESC, id DESC) WHERE actor_uuid IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs (created_at);
 
 -- =============================================================================

@@ -9,6 +9,8 @@ import (
 	"context"
 	"encoding/json"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 const cleanupAuditLogs = `-- name: CleanupAuditLogs :execrows
@@ -27,29 +29,29 @@ const countAuditLogs = `-- name: CountAuditLogs :one
 SELECT count(*) FROM audit_logs
 WHERE ($1::text = '' OR entity_type = $1)
   AND ($2::text = '' OR entity_id = $2)
-  AND ($3::text = '' OR actor_id = $3)
+  AND ($3::uuid IS NULL OR actor_uuid = $3)
 `
 
 type CountAuditLogsParams struct {
-	EntityType string `db:"entity_type" json:"entity_type"`
-	EntityID   string `db:"entity_id" json:"entity_id"`
-	ActorID    string `db:"actor_id" json:"actor_id"`
+	EntityType string     `db:"entity_type" json:"entity_type"`
+	EntityID   string     `db:"entity_id" json:"entity_id"`
+	ActorUUID  *uuid.UUID `db:"actor_uuid" json:"actor_uuid"`
 }
 
 func (q *Queries) CountAuditLogs(ctx context.Context, arg CountAuditLogsParams) (int64, error) {
-	row := q.db.QueryRow(ctx, countAuditLogs, arg.EntityType, arg.EntityID, arg.ActorID)
+	row := q.db.QueryRow(ctx, countAuditLogs, arg.EntityType, arg.EntityID, arg.ActorUUID)
 	var count int64
 	err := row.Scan(&count)
 	return count, err
 }
 
 const createAuditLog = `-- name: CreateAuditLog :exec
-INSERT INTO audit_logs (actor_id, action, entity_type, entity_id, changes, trace_id)
+INSERT INTO audit_logs (actor_uuid, action, entity_type, entity_id, changes, trace_id)
 VALUES ($1, $2, $3, $4, $5, $6)
 `
 
 type CreateAuditLogParams struct {
-	ActorID    *string         `db:"actor_id" json:"actor_id"`
+	ActorUUID  *uuid.UUID      `db:"actor_uuid" json:"actor_uuid"`
 	Action     string          `db:"action" json:"action"`
 	EntityType string          `db:"entity_type" json:"entity_type"`
 	EntityID   string          `db:"entity_id" json:"entity_id"`
@@ -59,7 +61,7 @@ type CreateAuditLogParams struct {
 
 func (q *Queries) CreateAuditLog(ctx context.Context, arg CreateAuditLogParams) error {
 	_, err := q.db.Exec(ctx, createAuditLog,
-		arg.ActorID,
+		arg.ActorUUID,
 		arg.Action,
 		arg.EntityType,
 		arg.EntityID,
@@ -70,20 +72,20 @@ func (q *Queries) CreateAuditLog(ctx context.Context, arg CreateAuditLogParams) 
 }
 
 const listAuditLogs = `-- name: ListAuditLogs :many
-SELECT id, created_at, actor_id, action, entity_type, entity_id, changes, trace_id FROM audit_logs
+SELECT id, created_at, actor_uuid, action, entity_type, entity_id, changes, trace_id FROM audit_logs
 WHERE ($1::text = '' OR entity_type = $1)
   AND ($2::text = '' OR entity_id = $2)
-  AND ($3::text = '' OR actor_id = $3)
+  AND ($3::uuid IS NULL OR actor_uuid = $3)
 ORDER BY created_at DESC, id DESC
 LIMIT $5 OFFSET $4
 `
 
 type ListAuditLogsParams struct {
-	EntityType string `db:"entity_type" json:"entity_type"`
-	EntityID   string `db:"entity_id" json:"entity_id"`
-	ActorID    string `db:"actor_id" json:"actor_id"`
-	Offset     int32  `db:"offset" json:"offset"`
-	Limit      int32  `db:"limit" json:"limit"`
+	EntityType string     `db:"entity_type" json:"entity_type"`
+	EntityID   string     `db:"entity_id" json:"entity_id"`
+	ActorUUID  *uuid.UUID `db:"actor_uuid" json:"actor_uuid"`
+	Offset     int32      `db:"offset" json:"offset"`
+	Limit      int32      `db:"limit" json:"limit"`
 }
 
 // Newest first; an empty filter matches everything.
@@ -91,7 +93,7 @@ func (q *Queries) ListAuditLogs(ctx context.Context, arg ListAuditLogsParams) ([
 	rows, err := q.db.Query(ctx, listAuditLogs,
 		arg.EntityType,
 		arg.EntityID,
-		arg.ActorID,
+		arg.ActorUUID,
 		arg.Offset,
 		arg.Limit,
 	)
@@ -105,7 +107,7 @@ func (q *Queries) ListAuditLogs(ctx context.Context, arg ListAuditLogsParams) ([
 		if err := rows.Scan(
 			&i.ID,
 			&i.CreatedAt,
-			&i.ActorID,
+			&i.ActorUUID,
 			&i.Action,
 			&i.EntityType,
 			&i.EntityID,

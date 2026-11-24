@@ -35,8 +35,7 @@ func (s *AuditService) Record(ctx context.Context, e auditlog.Entry) error {
 	}
 
 	if a, ok := actor.From(ctx); ok {
-		id := a.UserUUID.String()
-		entry.ActorID = &id
+		entry.ActorUUID = &a.UserUUID
 	}
 
 	if traceID := logger.GetTraceID(ctx); traceID != "" {

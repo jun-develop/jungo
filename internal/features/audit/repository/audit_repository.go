@@ -31,7 +31,7 @@ func (r *AuditRepository) Create(ctx context.Context, entry *domain.AuditLog) er
 	}
 
 	err = r.db.Queries(ctx).CreateAuditLog(ctx, sqlc.CreateAuditLogParams{
-		ActorID:    entry.ActorID,
+		ActorUUID:  entry.ActorUUID,
 		Action:     entry.Action,
 		EntityType: entry.EntityType,
 		EntityID:   entry.EntityID,
@@ -52,7 +52,7 @@ func (r *AuditRepository) List(ctx context.Context, filter domain.AuditLogListFi
 	rows, err := queries.ListAuditLogs(ctx, sqlc.ListAuditLogsParams{
 		EntityType: filter.EntityType,
 		EntityID:   filter.EntityID,
-		ActorID:    filter.ActorID,
+		ActorUUID:  filter.ActorUUID,
 		Limit:      filter.Limit,
 		Offset:     filter.Offset,
 	})
@@ -63,7 +63,7 @@ func (r *AuditRepository) List(ctx context.Context, filter domain.AuditLogListFi
 	total, err := queries.CountAuditLogs(ctx, sqlc.CountAuditLogsParams{
 		EntityType: filter.EntityType,
 		EntityID:   filter.EntityID,
-		ActorID:    filter.ActorID,
+		ActorUUID:  filter.ActorUUID,
 	})
 	if err != nil {
 		return nil, 0, wrap("count", err)
@@ -90,7 +90,7 @@ func mapAuditLog(row sqlc.AuditLog) *domain.AuditLog {
 	return &domain.AuditLog{
 		ID:         row.ID,
 		CreatedAt:  row.CreatedAt,
-		ActorID:    row.ActorID,
+		ActorUUID:  row.ActorUUID,
 		Action:     row.Action,
 		EntityType: row.EntityType,
 		EntityID:   row.EntityID,

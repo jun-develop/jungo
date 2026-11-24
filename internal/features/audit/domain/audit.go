@@ -4,6 +4,8 @@ import (
 	"context"
 	"time"
 
+	"github.com/google/uuid"
+
 	"jungo/internal/common/auditlog"
 )
 
@@ -14,7 +16,7 @@ const Retention = 30 * 24 * time.Hour
 type AuditLog struct {
 	ID         int64
 	CreatedAt  time.Time
-	ActorID    *string
+	ActorUUID  *uuid.UUID
 	Action     string
 	EntityType string
 	EntityID   string
@@ -26,7 +28,7 @@ type AuditLog struct {
 type AuditLogListFilter struct {
 	EntityType string
 	EntityID   string
-	ActorID    string
+	ActorUUID  *uuid.UUID
 	Limit      int32
 	Offset     int32
 }

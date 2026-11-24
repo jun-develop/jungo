@@ -13,8 +13,8 @@ package service
 // Total scenarios: 6
 //
 // #   Test Case                                              Scenario                              Expected Result
-// 1   TestAuditService_Record_TakesActorAndTraceFromContext  Logged-in user updates, request trace  actor_id and trace_id set; only changed keys of After kept, as before/after
-// 2   TestAuditService_Record_TakesActorAndTraceFromContext  Console command deletes (no actor)     actor_id and trace_id nil; Before's keys kept with after null
+// 1   TestAuditService_Record_TakesActorAndTraceFromContext  Logged-in user updates, request trace  actor_uuid and trace_id set; only changed keys of After kept, as before/after
+// 2   TestAuditService_Record_TakesActorAndTraceFromContext  Console command deletes (no actor)     actor_uuid and trace_id nil; Before's keys kept with after null
 // 3   TestAuditService_ListAuditLogs_ValidatesTheFilter      No filter                             Repository receives it
 // 4   TestAuditService_ListAuditLogs_ValidatesTheFilter      entity_type and entity_id             Repository receives it
 // 5   TestAuditService_ListAuditLogs_ValidatesTheFilter      entity_id without entity_type         ErrEntityTypeRequired; repository not called
@@ -55,7 +55,7 @@ func TestAuditService_Record_TakesActorAndTraceFromContext(t *testing.T) {
 				After:  map[string]any{"first_name": "Anna", "last_name": "Lee", "phone_number": "1"},
 			},
 			want: domain.AuditLog{
-				ActorID: new(userUUID.String()), Action: "update", EntityType: "users", EntityID: "u-1",
+				ActorUUID: &userUUID, Action: "update", EntityType: "users", EntityID: "u-1",
 				Changes: map[string]any{"first_name": map[string]any{"before": "Ann", "after": "Anna"}}, TraceID: new("trace-1"),
 			},
 		},

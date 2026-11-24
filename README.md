@@ -858,7 +858,7 @@ them, and review checks them.
   changed as `{"name": {"before": "Old", "after": "New"}}`. For a partial-update input,
   `auditlog.Changes(input)` builds `After` from the fields set (tag a secret field `audit:"-"`).
   Users and roles are recorded today; admins with `audit_logs:read` read the entries at
-  `GET /api/v1/audit-logs?entity_type=users&entity_id=<uuid>` (or `actor_id=`).
+  `GET /api/v1/audit-logs?entity_type=users&entity_id=<uuid>` (or `actor_uuid=`).
   The audit feature is optional: remove `audit.Module` from `internal/app/fx.go` and the app gives
   the features `auditlog.Nop`, a Recorder that records nothing; no feature changes.
 
