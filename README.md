@@ -390,19 +390,24 @@ Errors look like this:
 {
   "status": "error",
   "code": "UNAUTHORIZED",
+  "reason": "token_expired",
   "message": "Token has expired"
 }
 ```
 
-| HTTP | `message` | What to do |
-|---|---|---|
-| 401 | Token has expired | Call `/auth/refresh`, then retry the request |
-| 401 | Token has been revoked · Refresh token was already used… · Invalid token | Send the user to the login screen |
-| 401 | Invalid token type | A refresh token was sent as `Bearer`; use the access token |
-| 401 | Invalid email or password (…) | Wrong credentials; the longer variant means the IP is close to being blocked |
-| 422 | Password is too long… | Over 72 bytes (bcrypt's limit); accented characters count as several bytes |
-| 403 | Your account is not active | Account disabled |
-| 429 | Too many failed login attempts… · Your IP has been temporarily blocked… | Too many failed logins; wait |
+Branch on `reason`, never on `message`: `message` is translated (`API_LANGUAGE`) and its wording
+may change, while `reason` is the error's fixed key. Every error response carries one (e.g.
+`validation_error` on a 422, `api_not_found`, `too_many_requests`); success responses don't.
+
+| HTTP | `reason` | `message` | What to do |
+|---|---|---|---|
+| 401 | `token_expired` | Token has expired | Call `/auth/refresh`, then retry the request |
+| 401 | `token_revoked` · `token_reused` · `invalid_token` · `unauthorized_token` | Token has been revoked · Refresh token was already used… · Invalid token · Authentication token is invalid or expired | Send the user to the login screen |
+| 401 | `invalid_token_type` | Invalid token type | A refresh token was sent as `Bearer`; use the access token |
+| 401 | `invalid_credentials` · `invalid_credentials_warning` | Invalid email or password (…) | Wrong credentials; the warning variant means the IP is close to being blocked |
+| 422 | `password_too_long` | Password is too long… | Over 72 bytes (bcrypt's limit); accented characters count as several bytes |
+| 403 | `user_account_is_not_active` | Your account is not active | Account disabled |
+| 429 | `too_many_login_attempts` · `ip_temporarily_blocked` | Too many failed login attempts… · Your IP has been temporarily blocked… | Too many failed logins; wait |
 
 ### Internal endpoints (service-to-service)
 
