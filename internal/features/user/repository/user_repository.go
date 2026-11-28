@@ -44,7 +44,11 @@ func (r *UserRepository) Create(ctx context.Context, input domain.CreateUserInpu
 		}))
 	}
 
-	return mapUser(row), nil
+	// A new user holds no role yet.
+	user := mapUser(row)
+	user.Roles = []domain.UserRole{}
+
+	return user, nil
 }
 
 // GetByUUID implements domain.UserRepository.
@@ -54,7 +58,7 @@ func (r *UserRepository) GetByUUID(ctx context.Context, uid uuid.UUID) (*domain.
 		return nil, wrap("get by uuid", database.MatchNotFound(err, domain.ErrUserNotFound))
 	}
 
-	return mapUser(row), nil
+	return r.withRoles(ctx, mapUser(row))
 }
 
 // GetCredentialsByEmail implements domain.UserRepository.
@@ -94,12 +98,28 @@ func (r *UserRepository) List(ctx context.Context, filter domain.UserListFilter)
 	queries := r.db.Queries(ctx)
 	search := database.EscapeLike(filter.Search)
 
+	// nil, not an empty array, is what the queries read as "any role".
+	var roleUUIDs []uuid.UUID
+	if len(filter.RoleUUIDs) > 0 {
+		roleUUIDs = filter.RoleUUIDs
+	}
+
 	var rows []sqlc.User
 	var err error
-	if filter.SortOrder == "asc" {
-		rows, err = queries.ListUsersOldest(ctx, sqlc.ListUsersOldestParams{Search: search, Limit: filter.Limit, Offset: filter.Offset})
-	} else {
-		rows, err = queries.ListUsersNewest(ctx, sqlc.ListUsersNewestParams{Search: search, Limit: filter.Limit, Offset: filter.Offset})
+	switch {
+	case filter.SortBy != "" && filter.SortBy != "created_at":
+		rows, err = queries.ListUsersSorted(ctx, sqlc.ListUsersSortedParams{
+			Search: search, Status: filter.Status, RoleUuids: roleUUIDs,
+			SortBy: filter.SortBy, Descending: filter.SortOrder != "asc", Limit: filter.Limit, Offset: filter.Offset,
+		})
+	case filter.SortOrder == "asc":
+		rows, err = queries.ListUsersOldest(ctx, sqlc.ListUsersOldestParams{
+			Search: search, Status: filter.Status, RoleUuids: roleUUIDs, Limit: filter.Limit, Offset: filter.Offset,
+		})
+	default:
+		rows, err = queries.ListUsersNewest(ctx, sqlc.ListUsersNewestParams{
+			Search: search, Status: filter.Status, RoleUuids: roleUUIDs, Limit: filter.Limit, Offset: filter.Offset,
+		})
 	}
 
 	if err != nil {
@@ -107,13 +127,16 @@ func (r *UserRepository) List(ctx context.Context, filter domain.UserListFilter)
 	}
 
 	users := slicex.Map(rows, mapUser)
+	if err := r.fillRoles(ctx, users); err != nil {
+		return nil, 0, err
+	}
 
 	// A short page that is not past the end is the last one, so it already gives the total.
 	if len(rows) < int(filter.Limit) && (len(rows) > 0 || filter.Offset == 0) {
 		return users, int64(filter.Offset) + int64(len(rows)), nil
 	}
 
-	total, err := queries.CountUsers(ctx, search)
+	total, err := queries.CountUsers(ctx, sqlc.CountUsersParams{Search: search, Status: filter.Status, RoleUuids: roleUUIDs})
 	if err != nil {
 		return nil, 0, wrap("count", err)
 	}
@@ -135,7 +158,7 @@ func (r *UserRepository) Update(ctx context.Context, uid uuid.UUID, input domain
 		return nil, wrap("update", database.MatchNotFound(err, domain.ErrUserNotFound))
 	}
 
-	return mapUser(row), nil
+	return r.withRoles(ctx, mapUser(row))
 }
 
 // Delete implements domain.UserRepository; it soft-deletes via deleted_at.
@@ -171,6 +194,42 @@ func (r *UserRepository) LockByUUID(ctx context.Context, uid uuid.UUID) (int64, 
 	}
 
 	return id, nil
+}
+
+// withRoles fills user's roles and returns it.
+func (r *UserRepository) withRoles(ctx context.Context, user *domain.User) (*domain.User, error) {
+	if err := r.fillRoles(ctx, []*domain.User{user}); err != nil {
+		return nil, err
+	}
+
+	return user, nil
+}
+
+// fillRoles fills the roles of users, by name, with one query; a user without roles gets an empty list.
+func (r *UserRepository) fillRoles(ctx context.Context, users []*domain.User) error {
+	if len(users) == 0 {
+		return nil
+	}
+
+	byUUID := make(map[uuid.UUID]*domain.User, len(users))
+	uids := make([]uuid.UUID, len(users))
+	for i, u := range users {
+		u.Roles = []domain.UserRole{}
+		byUUID[u.UUID] = u
+		uids[i] = u.UUID
+	}
+
+	rows, err := r.db.Queries(ctx).ListRolesOfUsers(ctx, uids)
+	if err != nil {
+		return wrap("list roles", err)
+	}
+
+	for _, row := range rows {
+		u := byUUID[row.UserUUID]
+		u.Roles = append(u.Roles, domain.UserRole{UUID: row.UUID, Code: row.Code, Name: row.Name, IsSystem: row.IsSystem})
+	}
+
+	return nil
 }
 
 // mapUser converts a generated sqlc.User row to the domain model.

@@ -27,13 +27,10 @@ var userStatusNames = map[int16]string{
 	UserStatusInactive: UserStatusNameInactive,
 }
 
-// UserStatusName returns the API name of a status code ("unknown" if unmapped).
+// UserStatusName returns the API name of a status code. chk_users_status keeps every stored status
+// in userStatusNames.
 func UserStatusName(status int16) string {
-	if name, ok := userStatusNames[status]; ok {
-		return name
-	}
-
-	return "unknown"
+	return userStatusNames[status]
 }
 
 // ParseUserStatus returns the status code for an API name.
@@ -58,6 +55,16 @@ type User struct {
 	Status      int16
 	CreatedAt   time.Time
 	UpdatedAt   *time.Time
+	// Roles are the user's roles by name; the repository fills them on every user it returns.
+	Roles []UserRole
+}
+
+// UserRole is a role a user holds, as user responses show it.
+type UserRole struct {
+	UUID     uuid.UUID
+	Code     string
+	Name     string
+	IsSystem bool
 }
 
 // IsActive checks if the user is active.
@@ -119,9 +126,15 @@ type UpdateUserInput struct {
 
 // UserListFilter holds parameters for filtering and paginating users.
 type UserListFilter struct {
-	Search    string
+	Search string
+	// Status keeps only users with this status when not nil.
+	Status *int16
+	// RoleUUIDs keeps only users holding at least one of these roles when not empty.
+	RoleUUIDs []uuid.UUID
 	Limit     int32
 	Offset    int32
+	// SortBy is created_at, email, first_name, last_name or status; SortOrder is asc or desc.
+	SortBy    string
 	SortOrder string
 }
 

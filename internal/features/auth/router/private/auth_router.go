@@ -10,6 +10,7 @@ import (
 	"github.com/jun-develop/junkit/response"
 
 	"jungo/internal/config"
+	"jungo/internal/features/auth/domain"
 	v1dto "jungo/internal/features/auth/dto/v1"
 	v1handler "jungo/internal/features/auth/handler/v1"
 	"jungo/internal/middleware"
@@ -46,10 +47,14 @@ func (r *AuthRoutes) Register(group *gin.RouterGroup) {
 // Docs implements router.Documented.
 func (r *AuthRoutes) Docs() []apidoc.Route {
 	token := v1dto.TokenRequest{}
+	invalid := []*response.AppError{domain.ErrInvalidToken, domain.ErrTokenNotFound}
 
 	return []apidoc.Route{
-		{Method: http.MethodPost, Path: "/internal/auth/token-details", Summary: "Resolve a token to its user and session", Body: token, Response: v1dto.TokenDetailsResponse{}},
-		{Method: http.MethodPost, Path: "/internal/auth/revoke", Summary: "Revoke the token's session", Body: token},
-		{Method: http.MethodPost, Path: "/internal/auth/revoke-all", Summary: "Revoke every session of the token's user", Body: token},
+		{
+			ID: "getTokenDetails", Method: http.MethodPost, Path: "/internal/auth/token-details", Summary: "Resolve a token to its user and session",
+			Body: token, Response: v1dto.TokenDetailsResponse{}, Errors: invalid,
+		},
+		{ID: "revokeToken", Method: http.MethodPost, Path: "/internal/auth/revoke", Summary: "Revoke the token's session", Body: token, Errors: invalid},
+		{ID: "revokeAllTokens", Method: http.MethodPost, Path: "/internal/auth/revoke-all", Summary: "Revoke every session of the token's user", Body: token, Errors: invalid},
 	}
 }

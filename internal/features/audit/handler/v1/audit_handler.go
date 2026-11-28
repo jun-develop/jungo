@@ -36,7 +36,7 @@ func (h *AuditHandler) ListAuditLogs(ctx *gin.Context) {
 		return
 	}
 
-	req.SetDefaults("created_at", "desc")
+	req.SetDefaults()
 
 	items, total, err := h.service.ListAuditLogs(ctx.Request.Context(), v1dto.ToAuditLogListFilter(req))
 	if err != nil {

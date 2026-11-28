@@ -9,16 +9,19 @@ package service
 //          filters are valid, and the cleanup cutoff.
 // Type: Unit (Func-field fakes)
 //
-// Test functions: 3
-// Total scenarios: 6
+// Test functions: 4
+// Total scenarios: 9
 //
 // #   Test Case                                              Scenario                              Expected Result
 // 1   TestAuditService_Record_TakesActorAndTraceFromContext  Logged-in user updates, request trace  actor_uuid and trace_id set; only changed keys of After kept, as before/after
 // 2   TestAuditService_Record_TakesActorAndTraceFromContext  Console command deletes (no actor)     actor_uuid and trace_id nil; Before's keys kept with after null
-// 3   TestAuditService_ListAuditLogs_ValidatesTheFilter      No filter                             Repository receives it
-// 4   TestAuditService_ListAuditLogs_ValidatesTheFilter      entity_type and entity_id             Repository receives it
-// 5   TestAuditService_ListAuditLogs_ValidatesTheFilter      entity_id without entity_type         ErrEntityTypeRequired; repository not called
-// 6   TestAuditService_CleanupLogs_DeletesPastRetention      Clock at a fixed time                 Repository receives now minus 30 days; its count returned
+// 3   TestAuditService_Record_SkipsUnchangedValues           Before and After hold the same values  Nothing stored
+// 4   TestAuditService_Record_SkipsUnchangedValues           Neither Before nor After (an event)    Stored with empty changes
+// 5   TestAuditService_ListAuditLogs_ValidatesTheFilter      No filter                             Repository receives it
+// 6   TestAuditService_ListAuditLogs_ValidatesTheFilter      entity_type and entity_id             Repository receives it
+// 7   TestAuditService_ListAuditLogs_ValidatesTheFilter      Every other filter set                Repository receives it
+// 8   TestAuditService_ListAuditLogs_ValidatesTheFilter      entity_id without entity_type         ErrEntityTypeRequired; repository not called
+// 9   TestAuditService_CleanupLogs_DeletesPastRetention      Clock at a fixed time                 Repository receives now minus 30 days; its count returned
 //
 // =============================================================================
 
@@ -89,6 +92,45 @@ func TestAuditService_Record_TakesActorAndTraceFromContext(t *testing.T) {
 	}
 }
 
+func TestAuditService_Record_SkipsUnchangedValues(t *testing.T) {
+	tests := []struct {
+		name      string
+		entry     auditlog.Entry
+		wantSaved bool
+	}{
+		{
+			name: "before and after hold the same values",
+			entry: auditlog.Entry{
+				Action: "set_roles", EntityType: "users", EntityID: "u-1",
+				Before: map[string]any{"roles": []string{"editor"}}, After: map[string]any{"roles": []string{"editor"}},
+			},
+		},
+		{name: "neither before nor after (an event)", entry: auditlog.Entry{Action: "change_password", EntityType: "users", EntityID: "u-1"}, wantSaved: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var saved *domain.AuditLog
+			repo := &fakeAuditRepository{CreateFunc: func(_ context.Context, entry *domain.AuditLog) error {
+				saved = entry
+				return nil
+			}}
+
+			if err := NewAuditService(repo).Record(context.Background(), tt.entry); err != nil {
+				t.Fatalf("Record() error = %v", err)
+			}
+
+			if (saved != nil) != tt.wantSaved {
+				t.Fatalf("Record(%+v) stored %v, want stored = %v", tt.entry, saved, tt.wantSaved)
+			}
+
+			if saved != nil && len(saved.Changes) != 0 {
+				t.Errorf("stored changes = %v, want {}", saved.Changes)
+			}
+		})
+	}
+}
+
 func TestAuditService_ListAuditLogs_ValidatesTheFilter(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -97,6 +139,14 @@ func TestAuditService_ListAuditLogs_ValidatesTheFilter(t *testing.T) {
 	}{
 		{"no filter", domain.AuditLogListFilter{Limit: 10}, nil},
 		{"entity_type and entity_id", domain.AuditLogListFilter{EntityType: "users", EntityID: "u-1", Limit: 10}, nil},
+		{
+			"every other filter set",
+			domain.AuditLogListFilter{
+				ActorUUID: new(uuid.New()), Actions: []string{"create", "set_roles"}, From: new(time.Now().Add(-time.Hour)), To: new(time.Now()),
+				Search: "ann", Ascending: true, Limit: 10,
+			},
+			nil,
+		},
 		{"entity_id without entity_type", domain.AuditLogListFilter{EntityID: "u-1", Limit: 10}, domain.ErrEntityTypeRequired},
 	}
 
@@ -118,7 +168,7 @@ func TestAuditService_ListAuditLogs_ValidatesTheFilter(t *testing.T) {
 				t.Errorf("repository asked %+v, want no call", *asked)
 			}
 
-			if tt.wantErr == nil && (asked == nil || *asked != tt.filter) {
+			if tt.wantErr == nil && (asked == nil || !reflect.DeepEqual(*asked, tt.filter)) {
 				t.Errorf("repository received %v, want %+v", asked, tt.filter)
 			}
 		})

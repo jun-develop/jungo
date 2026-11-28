@@ -53,7 +53,7 @@ var Module = fx.Module("auth",
 		),
 	),
 	// The bearer-token middleware every feature's router protects its routes with.
-	fx.Provide(newAuthenticate),
+	fx.Provide(newAuthenticate, newAuthErrors),
 	fx.Provide(v1handler.NewAuthHandler),
 	fx.Provide(
 		fx.Annotate(
@@ -90,6 +90,15 @@ func newAuthenticate(svc domain.AuthService, responder response.Responder) middl
 	return middleware.Authenticate(middleware.BearerAuth(authenticator, responder))
 }
 
+// newAuthErrors lists what newAuthenticate's middleware answers besides 500, for the API docs.
+func newAuthErrors() middleware.AuthErrors {
+	return middleware.AuthErrors{
+		middleware.ErrUnauthorizedToken,
+		domain.ErrInvalidToken, domain.ErrInvalidTokenType, domain.ErrTokenExpired, domain.ErrTokenRevoked,
+		domain.ErrUserInactive,
+	}
+}
+
 // registerTranslations registers this feature's messages.
 func registerTranslations(translator *i18n.Translator) {
 	translator.AddTranslations(map[string]map[string]string{
@@ -98,6 +107,11 @@ func registerTranslations(translator *i18n.Translator) {
 			"token_refreshed":                  "Token refreshed successfully",
 			"logged_out":                       "Logged out successfully",
 			"logged_out_all":                   "Logged out from all sessions successfully",
+			"logged_out_others":                "Logged out from all other sessions successfully",
+			"password_changed":                 "Password changed successfully; your other sessions have been logged out",
+			"invalid_current_password":         "Current password is incorrect",
+			"new_password_same_as_current":     "New password must differ from the current one",
+			"session_not_found":                "Session not found",
 			"profile_retrieved":                "Profile retrieved successfully",
 			"sessions_listed":                  "Sessions listed successfully",
 			"token_details_retrieved":          "Token details retrieved successfully",

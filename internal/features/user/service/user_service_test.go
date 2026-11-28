@@ -9,8 +9,8 @@ package service
 //          who may act on which user.
 // Type: Unit (Func-field fakes)
 //
-// Test functions: 24
-// Total scenarios: 48
+// Test functions: 25
+// Total scenarios: 49
 //
 // #   Test Case                                                             Scenario                                 Expected Result
 // 1   TestUserService_CreateUser_HashesPasswordAndMapsErrors                Valid input                              Repository receives a bcrypt hash; one create entry without the password
@@ -39,28 +39,29 @@ package service
 // 24  TestUserService_UpdateUser_EnforcesAuthorization                      Permission removed since the cache       ErrForbidden; nothing written
 // 25  TestUserService_UpdateUser_EnforcesAuthorization                      Actor without the permission             ErrUserNotFound (user hidden)
 // 26  TestUserService_UpdateUser_EnforcesAuthorization                      User changes their own status            ErrCannotChangeOwnStatus
-// 27  TestUserService_DeleteUser_DeletesAndRevokesSessions                  Manager deletes a user                   That user deleted; sessions revoked; cache dropped; one delete entry
-// 28  TestUserService_DeleteUser_DeletesAndRevokesSessions                  Repository delete fails                  Database error; no session revoked
-// 29  TestUserService_DeleteUser_StopsWhenLookupFails                       User lookup fails                        Error returned; nothing deleted, no session revoked
-// 30  TestUserService_DeleteUser_RemovesAvatarFile                          Deleted user had an avatar               Avatar file deleted
-// 31  TestUserService_DeleteUser_LogsAvatarDeleteFailure                    Avatar file deletion fails               DeleteUser still succeeds; failure logged
-// 32  TestUserService_DeleteUser_EnforcesAuthorization                      Delete a user with equal permissions     Allowed
-// 33  TestUserService_DeleteUser_EnforcesAuthorization                      Delete a stronger user                   ErrCannotManageStrongerUser; nothing written
-// 34  TestUserService_DeleteUser_EnforcesAuthorization                      No actor in the request                  ErrUserNotFound (user hidden)
-// 35  TestUserService_DeleteUser_EnforcesAuthorization                      User deletes their own account           ErrCannotDeleteSelf
-// 36  TestUserService_UploadAvatar_ReplacesStoredFile                       User had an avatar                       Record updated before the old file is deleted; cache dropped
-// 37  TestUserService_UploadAvatar_ReplacesStoredFile                       User had no avatar                       Nothing deleted
-// 38  TestUserService_UploadAvatar_ReplacesStoredFile                       Upload fails                             ErrInvalidAvatarFile; record untouched
-// 39  TestUserService_UploadAvatar_ReplacesStoredFile                       Record update fails                      Error returned; new upload deleted, old avatar kept
-// 40  TestUserService_UploadAvatar_ReplacesStoredFile                       User lookup fails                        Error returned; new upload deleted
-// 41  TestUserService_UploadAvatar_RejectsUnauthorizedActorBeforeUploading  No actor in the request                  ErrUserNotFound; nothing uploaded
-// 42  TestUserService_UploadAvatar_ReauthorizesAfterUpload                  Target promoted during the upload        ErrCannotManageStrongerUser; nothing written, upload deleted
-// 43  TestUserService_DeleteAvatar_ClearsURLThenDeletesFile                 User has an avatar                       URL cleared, file deleted, cache dropped
-// 44  TestUserService_DeleteAvatar_ClearsURLThenDeletesFile                 Clearing the URL fails                   Error returned; file kept
-// 45  TestUserService_DeleteAvatar_ClearsURLThenDeletesFile                 No avatar                                No-op
-// 46  TestUserService_DeleteAvatar_ClearsURLThenDeletesFile                 Avatar URL is an empty string            Treated as no avatar
-// 47  TestUserService_DeleteAvatar_ClearsURLThenDeletesFile                 User lookup fails                        Error returned
-// 48  TestUserService_DeleteAvatar_PropagatesLockError                      Row lock fails                           Error returned; nothing updated or deleted
+// 27  TestUserService_UpdateUser_LetsUsersEditThemselves                    User without permissions renames self    Allowed; no permission read
+// 28  TestUserService_DeleteUser_DeletesAndRevokesSessions                  Manager deletes a user                   That user deleted; sessions revoked; cache dropped; one delete entry
+// 29  TestUserService_DeleteUser_DeletesAndRevokesSessions                  Repository delete fails                  Database error; no session revoked
+// 30  TestUserService_DeleteUser_StopsWhenLookupFails                       User lookup fails                        Error returned; nothing deleted, no session revoked
+// 31  TestUserService_DeleteUser_RemovesAvatarFile                          Deleted user had an avatar               Avatar file deleted
+// 32  TestUserService_DeleteUser_LogsAvatarDeleteFailure                    Avatar file deletion fails               DeleteUser still succeeds; failure logged
+// 33  TestUserService_DeleteUser_EnforcesAuthorization                      Delete a user with equal permissions     Allowed
+// 34  TestUserService_DeleteUser_EnforcesAuthorization                      Delete a stronger user                   ErrCannotManageStrongerUser; nothing written
+// 35  TestUserService_DeleteUser_EnforcesAuthorization                      No actor in the request                  ErrUserNotFound (user hidden)
+// 36  TestUserService_DeleteUser_EnforcesAuthorization                      User deletes their own account           ErrCannotDeleteSelf
+// 37  TestUserService_UploadAvatar_ReplacesStoredFile                       User had an avatar                       Record updated before the old file is deleted; cache dropped; one avatar_url entry
+// 38  TestUserService_UploadAvatar_ReplacesStoredFile                       User had no avatar                       Nothing deleted
+// 39  TestUserService_UploadAvatar_ReplacesStoredFile                       Upload fails                             ErrInvalidAvatarFile; record untouched
+// 40  TestUserService_UploadAvatar_ReplacesStoredFile                       Record update fails                      Error returned; new upload deleted, old avatar kept
+// 41  TestUserService_UploadAvatar_ReplacesStoredFile                       User lookup fails                        Error returned; new upload deleted
+// 42  TestUserService_UploadAvatar_RejectsUnauthorizedActorBeforeUploading  No actor in the request                  ErrUserNotFound; nothing uploaded
+// 43  TestUserService_UploadAvatar_ReauthorizesAfterUpload                  Target promoted during the upload        ErrCannotManageStrongerUser; nothing written, upload deleted
+// 44  TestUserService_DeleteAvatar_ClearsURLThenDeletesFile                 User has an avatar                       URL cleared, file deleted, cache dropped; one avatar_url entry
+// 45  TestUserService_DeleteAvatar_ClearsURLThenDeletesFile                 Clearing the URL fails                   Error returned; file kept
+// 46  TestUserService_DeleteAvatar_ClearsURLThenDeletesFile                 No avatar                                No-op
+// 47  TestUserService_DeleteAvatar_ClearsURLThenDeletesFile                 Avatar URL is an empty string            Treated as no avatar
+// 48  TestUserService_DeleteAvatar_ClearsURLThenDeletesFile                 User lookup fails                        Error returned
+// 49  TestUserService_DeleteAvatar_PropagatesLockError                      Row lock fails                           Error returned; nothing updated or deleted
 //
 // =============================================================================
 
@@ -322,7 +323,10 @@ func TestUserService_SetPasswordHash_UpdatesStoredHash(t *testing.T) {
 }
 
 func TestUserService_ListUsers_PassesFilterToRepository(t *testing.T) {
-	filter := domain.UserListFilter{Search: "jane", Limit: 10, Offset: 0, SortOrder: "asc"}
+	active := domain.UserStatusActive
+	filter := domain.UserListFilter{
+		Search: "jane", Status: &active, RoleUUIDs: []uuid.UUID{uuid.New()}, Limit: 10, Offset: 0, SortBy: "status", SortOrder: "asc",
+	}
 	var got domain.UserListFilter
 	repo := &fakeUserRepository{
 		ListFunc: func(_ context.Context, f domain.UserListFilter) ([]*domain.User, int64, error) {
@@ -337,7 +341,7 @@ func TestUserService_ListUsers_PassesFilterToRepository(t *testing.T) {
 		t.Fatalf("ListUsers() error = %v", err)
 	}
 
-	if got != filter {
+	if !reflect.DeepEqual(got, filter) {
 		t.Errorf("repository received filter %+v, want %+v", got, filter)
 	}
 
@@ -392,10 +396,11 @@ func TestUserService_UpdateUser_UpdatesActiveUserWithoutRevoking(t *testing.T) {
 		t.Fatalf("audit entries = %+v, want one", audit.entries)
 	}
 
+	// The audit log keeps only the values that differ; the status is recorded by its API name.
 	e := audit.entries[0]
-	if e.Action != "update" || e.EntityID != userID.String() || e.Before["first_name"] != "Old" ||
-		!reflect.DeepEqual(e.After, map[string]any{"first_name": "New"}) {
-		t.Errorf("audit entry = %+v, want an update of first_name from Old to New", e)
+	if e.Action != "update" || e.EntityID != userID.String() || e.Before["first_name"] != "Old" || e.After["first_name"] != "New" ||
+		e.Before["status"] != "active" || e.After["status"] != "active" {
+		t.Errorf("audit entry = %+v, want an update of first_name from Old to New, status by name", e)
 	}
 }
 
@@ -574,6 +579,28 @@ func TestUserService_UpdateUser_EnforcesAuthorization(t *testing.T) {
 				t.Errorf("user updated = %v, want %v", wrote, tt.want == nil)
 			}
 		})
+	}
+}
+
+func TestUserService_UpdateUser_LetsUsersEditThemselves(t *testing.T) {
+	self := uuid.New()
+	var updated uuid.UUID
+	repo := &fakeUserRepository{
+		GetByUUIDFunc: noAvatar,
+		UpdateFunc: func(_ context.Context, uid uuid.UUID, in domain.UpdateUserInput) (*domain.User, error) {
+			updated = uid
+			return &domain.User{UUID: uid, FirstName: deref(in.FirstName), Status: domain.UserStatusActive}, nil
+		},
+	}
+	// The actor holds no permission at all: being the user is enough.
+	svc := newTestService(t, UserServiceParams{Repo: repo, Sessions: &fakeSessionRevoker{}})
+
+	_, err := svc.UpdateUser(asActor(self), self, domain.UpdateUserInput{FirstName: new("Ann")})
+
+	wantErr(t, err, nil)
+
+	if updated != self {
+		t.Errorf("updated user = %v, want %v", updated, self)
 	}
 }
 
@@ -756,6 +783,22 @@ func TestUserService_DeleteUser_EnforcesAuthorization(t *testing.T) {
 	}
 }
 
+// wantAvatarEntry fails the test unless audit holds one update of user's avatar_url from before to after.
+func wantAvatarEntry(t *testing.T, audit *fakeRecorder, user uuid.UUID, before, after string) {
+	t.Helper()
+
+	if len(audit.entries) != 1 {
+		t.Fatalf("audit entries = %+v, want one", audit.entries)
+	}
+
+	e := audit.entries[0]
+	b, _ := e.Before["avatar_url"].(*string)
+	a, _ := e.After["avatar_url"].(*string)
+	if e.Action != "update" || e.EntityID != user.String() || deref(b) != before || deref(a) != after {
+		t.Errorf("audit entry = %+v, want an update of avatar_url from %q to %q", e, before, after)
+	}
+}
+
 func TestUserService_UploadAvatar_ReplacesStoredFile(t *testing.T) {
 	userID := uuid.New()
 	file := domain.AvatarFile{Filename: "me.png"}
@@ -779,7 +822,8 @@ func TestUserService_UploadAvatar_ReplacesStoredFile(t *testing.T) {
 			},
 		}
 		sessions := &fakeSessionRevoker{}
-		svc := newTestService(t, UserServiceParams{Repo: repo, Storage: storage, Sessions: sessions})
+		audit := &fakeRecorder{}
+		svc := newTestService(t, UserServiceParams{Repo: repo, Storage: storage, Sessions: sessions, Audit: audit})
 
 		user, err := svc.UploadAvatar(asActor(userID), userID, file)
 
@@ -803,6 +847,8 @@ func TestUserService_UploadAvatar_ReplacesStoredFile(t *testing.T) {
 		if !slices.Equal(sessions.invalidated, []uuid.UUID{userID}) {
 			t.Errorf("invalidated users = %v, want [%v]", sessions.invalidated, userID)
 		}
+
+		wantAvatarEntry(t, audit, userID, "old/avatar.png", "new/avatar.png")
 	})
 
 	t.Run("user had no avatar", func(t *testing.T) {
@@ -926,10 +972,12 @@ func TestUserService_DeleteAvatar_ClearsURLThenDeletesFile(t *testing.T) {
 		}
 		var deletedFiles []string
 		sessions := &fakeSessionRevoker{}
+		audit := &fakeRecorder{}
 		svc := newTestService(t, UserServiceParams{
 			Repo:     repo,
 			Storage:  &fakeStorage{DeleteFileFunc: recordDeletes(&deletedFiles)},
 			Sessions: sessions,
+			Audit:    audit,
 		})
 
 		if _, err := svc.DeleteAvatar(asActor(userID), userID); err != nil {
@@ -952,6 +1000,8 @@ func TestUserService_DeleteAvatar_ClearsURLThenDeletesFile(t *testing.T) {
 		if !slices.Equal(sessions.invalidated, []uuid.UUID{userID}) {
 			t.Errorf("invalidated users = %v, want [%v]", sessions.invalidated, userID)
 		}
+
+		wantAvatarEntry(t, audit, userID, "avatar.png", "")
 	})
 
 	t.Run("clearing the url fails", func(t *testing.T) {

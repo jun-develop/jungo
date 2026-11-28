@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 
 	"github.com/jun-develop/junkit/response"
 	"github.com/jun-develop/junkit/security"
@@ -116,6 +117,54 @@ func (h *AuthHandler) LogoutAll(ctx *gin.Context) {
 	}
 
 	h.responder.Send(ctx, http.StatusOK, "logged_out_all")
+}
+
+// LogoutOthers handles POST /auth/logout-others.
+func (h *AuthHandler) LogoutOthers(ctx *gin.Context) {
+	identity := security.MustGetIdentity[*domain.Identity](ctx)
+
+	if err := h.service.LogoutOthers(ctx.Request.Context(), identity); err != nil {
+		h.responder.Error(ctx, err)
+		return
+	}
+
+	h.responder.Send(ctx, http.StatusOK, "logged_out_others")
+}
+
+// RevokeSession handles DELETE /auth/sessions/:family_uuid; a malformed UUID is no session of the
+// user, so it gets the same 404.
+func (h *AuthHandler) RevokeSession(ctx *gin.Context) {
+	identity := security.MustGetIdentity[*domain.Identity](ctx)
+
+	family, err := uuid.Parse(ctx.Param("family_uuid"))
+	if err != nil {
+		h.responder.Error(ctx, domain.ErrSessionNotFound)
+		return
+	}
+
+	if err := h.service.RevokeSession(ctx.Request.Context(), identity, family); err != nil {
+		h.responder.Error(ctx, err)
+		return
+	}
+
+	h.responder.Send(ctx, http.StatusOK, "session_revoked")
+}
+
+// ChangePassword handles POST /auth/change-password.
+func (h *AuthHandler) ChangePassword(ctx *gin.Context) {
+	identity := security.MustGetIdentity[*domain.Identity](ctx)
+
+	var req v1dto.ChangePasswordRequest
+	if !validation.BindJSON(ctx, h.responder, h.validator, &req) {
+		return
+	}
+
+	if err := h.service.ChangePassword(ctx.Request.Context(), identity, v1dto.ToChangePasswordInput(req, clientMetadata(ctx))); err != nil {
+		h.responder.Error(ctx, err)
+		return
+	}
+
+	h.responder.Send(ctx, http.StatusOK, "password_changed")
 }
 
 // Me handles GET /auth/me.

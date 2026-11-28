@@ -143,9 +143,9 @@ func (s *AccessService) GetRole(ctx context.Context, uid uuid.UUID) (*domain.Rol
 	return s.getRole(ctx, uid, true)
 }
 
-// ListRoles returns every role with its permissions and user count.
-func (s *AccessService) ListRoles(ctx context.Context) ([]*domain.Role, error) {
-	return s.repo.ListRoles(ctx, nil, true)
+// ListRoles returns a page of roles with their permissions and user counts; the route requires roles:read.
+func (s *AccessService) ListRoles(ctx context.Context, filter domain.RoleListFilter) ([]*domain.Role, int64, error) {
+	return s.repo.ListRolesPage(ctx, filter)
 }
 
 // RenameRole changes a non-system role's display name; its code never changes. The actor must hold
@@ -319,16 +319,19 @@ func (s *AccessService) recordAudit(ctx context.Context, action, entityType stri
 	return s.audit.Record(ctx, auditlog.Entry{Action: action, EntityType: entityType, EntityID: uid.String(), Before: before, After: after})
 }
 
-// roleCodes returns the sorted codes of the non-system roles; SetUserRoles never changes system roles.
+// roleCodes returns the sorted codes of the non-system roles, [] for none; SetUserRoles never changes
+// system roles.
 func roleCodes(roles []*domain.Role) []string {
-	var codes []string
+	codes := []string{}
 	for _, r := range roles {
 		if !r.IsSystem {
 			codes = append(codes, r.Code)
 		}
 	}
 
-	return slices.Sorted(slices.Values(codes))
+	slices.Sort(codes)
+
+	return codes
 }
 
 // lockUserRoleChange locks every role a change of the user's roles to roleUUIDs touches, then
@@ -509,10 +512,10 @@ func changedPermissions(before, after []string) []string {
 }
 
 // normalizePermissions checks codes exist in the permissions table and returns them sorted,
-// without duplicates.
+// without duplicates; [] for none, so the audit log shows [] rather than null.
 func (s *AccessService) normalizePermissions(ctx context.Context, codes []string) ([]string, error) {
 	if len(codes) == 0 {
-		return nil, nil
+		return []string{}, nil
 	}
 
 	known, err := s.knownPermissions(ctx)

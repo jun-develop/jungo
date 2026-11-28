@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"path"
+	"slices"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -17,6 +18,7 @@ import (
 	"github.com/jun-develop/junkit/notification"
 	"github.com/jun-develop/junkit/response"
 
+	"jungo/internal/common/actor"
 	"jungo/internal/config"
 	policy "jungo/internal/middleware"
 )
@@ -66,6 +68,9 @@ type Params struct {
 	Notifier      notification.Notifier `optional:"true"`
 	Responder     response.Responder
 	Guard         *policy.Guard
+	AuthErrors    policy.AuthErrors
+	// Permissions are every permission code the features declare, the PermissionCode enum of the docs.
+	Permissions []string `group:"permissions"`
 }
 
 // RegisterAll sets up global middlewares, system routes, and feature routes. It fails when a
@@ -91,7 +96,11 @@ func RegisterAll(p Params) error {
 		return nil
 	}
 
-	spec, err := apidoc.Spec(apidoc.Info{Title: "API", Version: p.Config.Version}, ops)
+	info := apidoc.Info{Title: "Jungo API", Version: p.Config.Version, Enums: []apidoc.Enum{
+		apidoc.EnumOf[actor.PermissionCode](slices.Sorted(slices.Values(p.Permissions))...),
+	}}
+
+	spec, err := apidoc.Spec(info, ops)
 	if err != nil {
 		return fmt.Errorf("router: api docs: %w", err)
 	}
@@ -168,7 +177,9 @@ func registerFeatureRoutes(p Params, bodyLimits map[string]int64, docs map[strin
 }
 
 // verifyRoutes checks every /api route is wrapped by Guard and documented, and every body limit and
-// doc names a route. It returns the documented operations.
+// doc names a route. It returns the documented operations of the public API, each with the errors the
+// middlewares in front of it can answer; internal routes are left out, as no client of the docs calls
+// them.
 func verifyRoutes(p Params, bodyLimits map[string]int64, docs map[string]apidoc.Route) ([]apidoc.Operation, error) {
 	registered := make(map[string]bool)
 	var ops []apidoc.Operation
@@ -191,6 +202,11 @@ func verifyRoutes(p Params, bodyLimits map[string]int64, docs map[string]apidoc.
 			return nil, fmt.Errorf("router: %s %s has no apidoc.Route in its Routes' Docs()", r.Method, r.Path)
 		}
 
+		if pol.Kind == policy.PolicyInternal {
+			continue
+		}
+
+		doc.Errors = append(middlewareErrors(p, r.Path, doc, pol), doc.Errors...)
 		ops = append(ops, apidoc.Operation{Route: doc, Tag: docTag(r.Path), Security: docSecurity(pol)})
 	}
 
@@ -207,6 +223,40 @@ func verifyRoutes(p Params, bodyLimits map[string]int64, docs map[string]apidoc.
 	}
 
 	return ops, nil
+}
+
+// middlewareErrors returns the errors the global middlewares, the path patterns and the route's Guard
+// policy can answer before or around its handler.
+func middlewareErrors(p Params, routePath string, doc apidoc.Route, pol policy.Policy) []*response.AppError {
+	// Banner is listed even when off here: the docs are built in development, the API runs elsewhere.
+	errs := []*response.AppError{middleware.ErrTooManyRequests, middleware.ErrAccessDenied, response.ErrInternalServer}
+
+	if doc.Body != nil {
+		errs = append(errs, middleware.ErrBodyTooLarge, middleware.ErrInvalidBody)
+	}
+
+	for _, seg := range strings.Split(routePath, "/") {
+		if name, ok := strings.CutPrefix(seg, ":"); ok && routePatterns[name] != nil {
+			errs = append(errs, middleware.ErrAPINotFound)
+			break
+		}
+	}
+
+	switch pol.Kind {
+	case policy.PolicyPermission:
+		errs = append(append(errs, p.AuthErrors...), actor.ErrForbidden)
+	case policy.PolicyAuthenticated:
+		errs = append(errs, p.AuthErrors...)
+	}
+
+	return errs
+}
+
+// routePatterns are the rules path parameters must match; a mismatch is answered with 404.
+var routePatterns = map[string]func(string) bool{
+	"uuid": middleware.IsUUID,
+	"id":   middleware.IsID,
+	"slug": middleware.IsSlug,
 }
 
 // docTag groups a route in the docs by the first path segment after /api and its version.
@@ -291,10 +341,6 @@ func registerGlobalMiddlewares(p Params, bodyLimits map[string]int64) {
 			MaxBodySize: cfg.Security.MaxRequestBodySize,
 			RouteLimits: bodyLimits,
 		}, p.Responder),
-		middleware.RoutePatterns(map[string]func(string) bool{
-			"uuid": middleware.IsUUID,
-			"id":   middleware.IsID,
-			"slug": middleware.IsSlug,
-		}, p.Responder),
+		middleware.RoutePatterns(routePatterns, p.Responder),
 	)
 }

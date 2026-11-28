@@ -26,20 +26,38 @@ func (q *Queries) CleanupAuditLogs(ctx context.Context, before time.Time) (int64
 }
 
 const countAuditLogs = `-- name: CountAuditLogs :one
-SELECT count(*) FROM audit_logs
-WHERE ($1::text = '' OR entity_type = $1)
-  AND ($2::text = '' OR entity_id = $2)
-  AND ($3::uuid IS NULL OR actor_uuid = $3)
+SELECT count(*) FROM audit_logs a
+LEFT JOIN users au ON au.uuid = a.actor_uuid
+WHERE ($1::text = '' OR a.entity_type = $1)
+  AND ($2::text = '' OR a.entity_id = $2)
+  AND ($3::uuid IS NULL OR a.actor_uuid = $3)
+  AND ($4::text[] IS NULL OR a.action = ANY($4::text[]))
+  AND ($5::timestamptz IS NULL OR a.created_at >= $5)
+  AND ($6::timestamptz IS NULL OR a.created_at <= $6)
+  AND ($7::text = '' OR au.email ILIKE '%' || $7 || '%' OR (au.first_name || ' ' || au.last_name) ILIKE '%' || $7 || '%')
 `
 
 type CountAuditLogsParams struct {
-	EntityType string     `db:"entity_type" json:"entity_type"`
-	EntityID   string     `db:"entity_id" json:"entity_id"`
-	ActorUUID  *uuid.UUID `db:"actor_uuid" json:"actor_uuid"`
+	EntityType  string     `db:"entity_type" json:"entity_type"`
+	EntityID    string     `db:"entity_id" json:"entity_id"`
+	ActorUUID   *uuid.UUID `db:"actor_uuid" json:"actor_uuid"`
+	Actions     []string   `db:"actions" json:"actions"`
+	CreatedFrom *time.Time `db:"created_from" json:"created_from"`
+	CreatedTo   *time.Time `db:"created_to" json:"created_to"`
+	Search      string     `db:"search" json:"search"`
 }
 
+// The filter of ListAuditLogsNewest.
 func (q *Queries) CountAuditLogs(ctx context.Context, arg CountAuditLogsParams) (int64, error) {
-	row := q.db.QueryRow(ctx, countAuditLogs, arg.EntityType, arg.EntityID, arg.ActorUUID)
+	row := q.db.QueryRow(ctx, countAuditLogs,
+		arg.EntityType,
+		arg.EntityID,
+		arg.ActorUUID,
+		arg.Actions,
+		arg.CreatedFrom,
+		arg.CreatedTo,
+		arg.Search,
+	)
 	var count int64
 	err := row.Scan(&count)
 	return count, err
@@ -71,29 +89,71 @@ func (q *Queries) CreateAuditLog(ctx context.Context, arg CreateAuditLogParams) 
 	return err
 }
 
-const listAuditLogs = `-- name: ListAuditLogs :many
-SELECT id, created_at, actor_uuid, action, entity_type, entity_id, changes, trace_id FROM audit_logs
-WHERE ($1::text = '' OR entity_type = $1)
-  AND ($2::text = '' OR entity_id = $2)
-  AND ($3::uuid IS NULL OR actor_uuid = $3)
-ORDER BY created_at DESC, id DESC
-LIMIT $5 OFFSET $4
+const listAuditLogsNewest = `-- name: ListAuditLogsNewest :many
+SELECT a.id, a.created_at, a.actor_uuid, a.action, a.entity_type, a.entity_id, a.changes, a.trace_id,
+       au.email AS actor_email, au.first_name AS actor_first_name, au.last_name AS actor_last_name,
+       COALESCE(CASE a.entity_type
+           WHEN 'users' THEN eu.email
+           WHEN 'roles' THEN COALESCE(er.name, (
+               SELECT COALESCE(n.changes->'name'->>'after', n.changes->'name'->>'before') FROM audit_logs n
+               WHERE n.entity_type = 'roles' AND n.entity_id = a.entity_id AND n.changes ? 'name'
+               ORDER BY n.created_at DESC, n.id DESC LIMIT 1))
+       END, '')::text AS entity_label
+FROM audit_logs a
+LEFT JOIN users au ON au.uuid = a.actor_uuid
+LEFT JOIN users eu ON eu.uuid = CASE WHEN a.entity_type = 'users' THEN a.entity_id::uuid END
+LEFT JOIN roles er ON er.uuid = CASE WHEN a.entity_type = 'roles' THEN a.entity_id::uuid END
+WHERE ($1::text = '' OR a.entity_type = $1)
+  AND ($2::text = '' OR a.entity_id = $2)
+  AND ($3::uuid IS NULL OR a.actor_uuid = $3)
+  AND ($4::text[] IS NULL OR a.action = ANY($4::text[]))
+  AND ($5::timestamptz IS NULL OR a.created_at >= $5)
+  AND ($6::timestamptz IS NULL OR a.created_at <= $6)
+  AND ($7::text = '' OR au.email ILIKE '%' || $7 || '%' OR (au.first_name || ' ' || au.last_name) ILIKE '%' || $7 || '%')
+ORDER BY a.created_at DESC, a.id DESC
+LIMIT $9 OFFSET $8
 `
 
-type ListAuditLogsParams struct {
-	EntityType string     `db:"entity_type" json:"entity_type"`
-	EntityID   string     `db:"entity_id" json:"entity_id"`
-	ActorUUID  *uuid.UUID `db:"actor_uuid" json:"actor_uuid"`
-	Offset     int32      `db:"offset" json:"offset"`
-	Limit      int32      `db:"limit" json:"limit"`
+type ListAuditLogsNewestParams struct {
+	EntityType  string     `db:"entity_type" json:"entity_type"`
+	EntityID    string     `db:"entity_id" json:"entity_id"`
+	ActorUUID   *uuid.UUID `db:"actor_uuid" json:"actor_uuid"`
+	Actions     []string   `db:"actions" json:"actions"`
+	CreatedFrom *time.Time `db:"created_from" json:"created_from"`
+	CreatedTo   *time.Time `db:"created_to" json:"created_to"`
+	Search      string     `db:"search" json:"search"`
+	Offset      int32      `db:"offset" json:"offset"`
+	Limit       int32      `db:"limit" json:"limit"`
 }
 
-// Newest first; an empty filter matches everything.
-func (q *Queries) ListAuditLogs(ctx context.Context, arg ListAuditLogsParams) ([]AuditLog, error) {
-	rows, err := q.db.Query(ctx, listAuditLogs,
+type ListAuditLogsNewestRow struct {
+	ID             int64           `db:"id" json:"id"`
+	CreatedAt      time.Time       `db:"created_at" json:"created_at"`
+	ActorUUID      *uuid.UUID      `db:"actor_uuid" json:"actor_uuid"`
+	Action         string          `db:"action" json:"action"`
+	EntityType     string          `db:"entity_type" json:"entity_type"`
+	EntityID       string          `db:"entity_id" json:"entity_id"`
+	Changes        json.RawMessage `db:"changes" json:"changes"`
+	TraceID        *string         `db:"trace_id" json:"trace_id"`
+	ActorEmail     *string         `db:"actor_email" json:"actor_email"`
+	ActorFirstName *string         `db:"actor_first_name" json:"actor_first_name"`
+	ActorLastName  *string         `db:"actor_last_name" json:"actor_last_name"`
+	EntityLabel    string          `db:"entity_label" json:"entity_label"`
+}
+
+// Newest first. An empty filter matches everything; created_from and created_to are inclusive, and
+// search matches the actor's email or full name. The actor and the entity's label (a user's email, a
+// role's name; ” if unknown) are joined at read time, soft-deleted users included; a role deleted since keeps the
+// name the entry itself recorded, if any.
+func (q *Queries) ListAuditLogsNewest(ctx context.Context, arg ListAuditLogsNewestParams) ([]ListAuditLogsNewestRow, error) {
+	rows, err := q.db.Query(ctx, listAuditLogsNewest,
 		arg.EntityType,
 		arg.EntityID,
 		arg.ActorUUID,
+		arg.Actions,
+		arg.CreatedFrom,
+		arg.CreatedTo,
+		arg.Search,
 		arg.Offset,
 		arg.Limit,
 	)
@@ -101,9 +161,9 @@ func (q *Queries) ListAuditLogs(ctx context.Context, arg ListAuditLogsParams) ([
 		return nil, err
 	}
 	defer rows.Close()
-	items := []AuditLog{}
+	items := []ListAuditLogsNewestRow{}
 	for rows.Next() {
-		var i AuditLog
+		var i ListAuditLogsNewestRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.CreatedAt,
@@ -113,6 +173,106 @@ func (q *Queries) ListAuditLogs(ctx context.Context, arg ListAuditLogsParams) ([
 			&i.EntityID,
 			&i.Changes,
 			&i.TraceID,
+			&i.ActorEmail,
+			&i.ActorFirstName,
+			&i.ActorLastName,
+			&i.EntityLabel,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listAuditLogsOldest = `-- name: ListAuditLogsOldest :many
+SELECT a.id, a.created_at, a.actor_uuid, a.action, a.entity_type, a.entity_id, a.changes, a.trace_id,
+       au.email AS actor_email, au.first_name AS actor_first_name, au.last_name AS actor_last_name,
+       COALESCE(CASE a.entity_type
+           WHEN 'users' THEN eu.email
+           WHEN 'roles' THEN COALESCE(er.name, (
+               SELECT COALESCE(n.changes->'name'->>'after', n.changes->'name'->>'before') FROM audit_logs n
+               WHERE n.entity_type = 'roles' AND n.entity_id = a.entity_id AND n.changes ? 'name'
+               ORDER BY n.created_at DESC, n.id DESC LIMIT 1))
+       END, '')::text AS entity_label
+FROM audit_logs a
+LEFT JOIN users au ON au.uuid = a.actor_uuid
+LEFT JOIN users eu ON eu.uuid = CASE WHEN a.entity_type = 'users' THEN a.entity_id::uuid END
+LEFT JOIN roles er ON er.uuid = CASE WHEN a.entity_type = 'roles' THEN a.entity_id::uuid END
+WHERE ($1::text = '' OR a.entity_type = $1)
+  AND ($2::text = '' OR a.entity_id = $2)
+  AND ($3::uuid IS NULL OR a.actor_uuid = $3)
+  AND ($4::text[] IS NULL OR a.action = ANY($4::text[]))
+  AND ($5::timestamptz IS NULL OR a.created_at >= $5)
+  AND ($6::timestamptz IS NULL OR a.created_at <= $6)
+  AND ($7::text = '' OR au.email ILIKE '%' || $7 || '%' OR (au.first_name || ' ' || au.last_name) ILIKE '%' || $7 || '%')
+ORDER BY a.created_at, a.id
+LIMIT $9 OFFSET $8
+`
+
+type ListAuditLogsOldestParams struct {
+	EntityType  string     `db:"entity_type" json:"entity_type"`
+	EntityID    string     `db:"entity_id" json:"entity_id"`
+	ActorUUID   *uuid.UUID `db:"actor_uuid" json:"actor_uuid"`
+	Actions     []string   `db:"actions" json:"actions"`
+	CreatedFrom *time.Time `db:"created_from" json:"created_from"`
+	CreatedTo   *time.Time `db:"created_to" json:"created_to"`
+	Search      string     `db:"search" json:"search"`
+	Offset      int32      `db:"offset" json:"offset"`
+	Limit       int32      `db:"limit" json:"limit"`
+}
+
+type ListAuditLogsOldestRow struct {
+	ID             int64           `db:"id" json:"id"`
+	CreatedAt      time.Time       `db:"created_at" json:"created_at"`
+	ActorUUID      *uuid.UUID      `db:"actor_uuid" json:"actor_uuid"`
+	Action         string          `db:"action" json:"action"`
+	EntityType     string          `db:"entity_type" json:"entity_type"`
+	EntityID       string          `db:"entity_id" json:"entity_id"`
+	Changes        json.RawMessage `db:"changes" json:"changes"`
+	TraceID        *string         `db:"trace_id" json:"trace_id"`
+	ActorEmail     *string         `db:"actor_email" json:"actor_email"`
+	ActorFirstName *string         `db:"actor_first_name" json:"actor_first_name"`
+	ActorLastName  *string         `db:"actor_last_name" json:"actor_last_name"`
+	EntityLabel    string          `db:"entity_label" json:"entity_label"`
+}
+
+// ListAuditLogsNewest, oldest first.
+func (q *Queries) ListAuditLogsOldest(ctx context.Context, arg ListAuditLogsOldestParams) ([]ListAuditLogsOldestRow, error) {
+	rows, err := q.db.Query(ctx, listAuditLogsOldest,
+		arg.EntityType,
+		arg.EntityID,
+		arg.ActorUUID,
+		arg.Actions,
+		arg.CreatedFrom,
+		arg.CreatedTo,
+		arg.Search,
+		arg.Offset,
+		arg.Limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListAuditLogsOldestRow{}
+	for rows.Next() {
+		var i ListAuditLogsOldestRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.CreatedAt,
+			&i.ActorUUID,
+			&i.Action,
+			&i.EntityType,
+			&i.EntityID,
+			&i.Changes,
+			&i.TraceID,
+			&i.ActorEmail,
+			&i.ActorFirstName,
+			&i.ActorLastName,
+			&i.EntityLabel,
 		); err != nil {
 			return nil, err
 		}

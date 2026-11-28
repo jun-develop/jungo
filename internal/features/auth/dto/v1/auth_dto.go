@@ -7,6 +7,7 @@ import (
 
 	"github.com/jun-develop/junkit/slicex"
 
+	"jungo/internal/common/actor"
 	"jungo/internal/features/auth/domain"
 )
 
@@ -40,6 +41,17 @@ type ResetPasswordRequest struct {
 	Password string `json:"password" binding:"required,min=8,max=72,password_strong"`
 }
 
+// ChangePasswordRequest is the request body for POST /auth/change-password.
+type ChangePasswordRequest struct {
+	CurrentPassword string `json:"current_password" binding:"required,max=72"`
+	NewPassword     string `json:"new_password" binding:"required,min=8,max=72,password_strong"`
+}
+
+// ToChangePasswordInput converts ChangePasswordRequest and client metadata to domain input.
+func ToChangePasswordInput(req ChangePasswordRequest, meta domain.Metadata) domain.ChangePasswordInput {
+	return domain.ChangePasswordInput{CurrentPassword: req.CurrentPassword, NewPassword: req.NewPassword, Metadata: meta}
+}
+
 // TokenRequest is the request body for the internal token endpoints (/api/internal/auth/*).
 type TokenRequest struct {
 	Token string `json:"token" binding:"required,max=512"`
@@ -49,7 +61,7 @@ type TokenRequest struct {
 type TokenPairResponse struct {
 	AccessToken      string `json:"access_token"`
 	RefreshToken     string `json:"refresh_token"`
-	TokenType        string `json:"token_type"`
+	TokenType        string `json:"token_type" enum:"Bearer"`
 	ExpiresIn        int64  `json:"expires_in"`
 	RefreshExpiresIn int64  `json:"refresh_expires_in"`
 }
@@ -67,12 +79,13 @@ func NewTokenPairResponse(p *domain.TokenPair, now time.Time) TokenPairResponse 
 
 // SessionUserResponse is the user part of a session response.
 type SessionUserResponse struct {
-	UUID      uuid.UUID `json:"uuid"`
-	Email     string    `json:"email"`
-	FirstName string    `json:"first_name"`
-	LastName  string    `json:"last_name"`
-	AvatarURL *string   `json:"avatar_url"`
-	Active    bool      `json:"active"`
+	UUID        uuid.UUID `json:"uuid"`
+	Email       string    `json:"email"`
+	FirstName   string    `json:"first_name"`
+	LastName    string    `json:"last_name"`
+	PhoneNumber *string   `json:"phone_number"`
+	AvatarURL   *string   `json:"avatar_url"`
+	Active      bool      `json:"active"`
 }
 
 // SessionClientResponse is the client/session part of a session response.
@@ -88,8 +101,8 @@ type SessionClientResponse struct {
 type TokenStateResponse struct {
 	UUID      uuid.UUID  `json:"uuid"`
 	ExpiresAt time.Time  `json:"expires_at"`
-	RevokedAt *time.Time `json:"revoked_at,omitempty"`
-	Status    string     `json:"status"`
+	RevokedAt *time.Time `json:"revoked_at"`
+	Status    string     `json:"status" enum:"active expired revoked"`
 }
 
 // SessionResponse represents a session with its user and tokens (GET /auth/me, token details).
@@ -104,12 +117,13 @@ type SessionResponse struct {
 func NewSessionResponse(s *domain.Session, now time.Time) SessionResponse {
 	return SessionResponse{
 		User: SessionUserResponse{
-			UUID:      s.UserUUID,
-			Email:     s.Email,
-			FirstName: s.FirstName,
-			LastName:  s.LastName,
-			AvatarURL: s.AvatarURL,
-			Active:    s.UserActive,
+			UUID:        s.UserUUID,
+			Email:       s.Email,
+			FirstName:   s.FirstName,
+			LastName:    s.LastName,
+			PhoneNumber: s.PhoneNumber,
+			AvatarURL:   s.AvatarURL,
+			Active:      s.UserActive,
 		},
 		Session: SessionClientResponse{
 			FamilyUUID: s.FamilyUUID,
@@ -127,22 +141,18 @@ func NewSessionResponse(s *domain.Session, now time.Time) SessionResponse {
 // the user holds, for the UI to show what they may do (the server still checks every request).
 type MeResponse struct {
 	SessionResponse
-	Permissions []string `json:"permissions"`
+	Permissions []actor.PermissionCode `json:"permissions"`
 }
 
 // NewMeResponse converts a session and the user's permissions to MeResponse.
 func NewMeResponse(s *domain.Session, permissions []string, now time.Time) MeResponse {
-	if permissions == nil {
-		permissions = []string{}
-	}
-
-	return MeResponse{SessionResponse: NewSessionResponse(s, now), Permissions: permissions}
+	return MeResponse{SessionResponse: NewSessionResponse(s, now), Permissions: actor.PermissionCodes(permissions)}
 }
 
 // TokenDetailsResponse represents the JSON response for POST /internal/auth/token-details.
 type TokenDetailsResponse struct {
-	TokenType   string `json:"token_type"`
-	TokenStatus string `json:"token_status"`
+	TokenType   string `json:"token_type" enum:"access_token refresh_token"`
+	TokenStatus string `json:"token_status" enum:"active expired revoked"`
 	SessionResponse
 }
 

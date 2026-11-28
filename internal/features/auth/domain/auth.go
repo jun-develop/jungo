@@ -36,7 +36,12 @@ const (
 	RevokedReasonAdmin         = "admin"
 	RevokedReasonUserDisabled  = "user_disabled"
 	RevokedReasonPasswordReset = "password_reset"
+	// RevokedReasonPasswordChange ends the other sessions of a user who changed their password.
+	RevokedReasonPasswordChange = "password_change"
 )
+
+// ActionChangePassword is the audit action of a password change; it records no values.
+const ActionChangePassword = "change_password"
 
 // Refresh outcomes reported by RefreshSession (f_auth_refresh_session).
 const (
@@ -78,13 +83,14 @@ func (t TokenState) Status(now time.Time) string {
 
 // Session is one login session (token family): its user and latest token pair.
 type Session struct {
-	UserID     int64
-	UserUUID   uuid.UUID
-	Email      string
-	FirstName  string
-	LastName   string
-	AvatarURL  *string
-	UserActive bool
+	UserID      int64
+	UserUUID    uuid.UUID
+	Email       string
+	FirstName   string
+	LastName    string
+	PhoneNumber *string
+	AvatarURL   *string
+	UserActive  bool
 
 	FamilyUUID uuid.UUID
 	IPAddress  *string
@@ -177,6 +183,13 @@ type LoginInput struct {
 	Metadata Metadata
 }
 
+// ChangePasswordInput holds data for ChangePassword.
+type ChangePasswordInput struct {
+	CurrentPassword string
+	NewPassword     string
+	Metadata        Metadata
+}
+
 // TokenPair is the sealed token pair returned to the client.
 type TokenPair struct {
 	AccessToken      string
@@ -238,6 +251,10 @@ type AuthRepository interface {
 	RevokeFamilyByHash(ctx context.Context, hash, reason string) (uuid.UUID, error)
 	RevokeAllByHash(ctx context.Context, hash, reason string) ([]uuid.UUID, error)
 	RevokeAllForUser(ctx context.Context, userUUID uuid.UUID, reason string) ([]uuid.UUID, error)
+	// RevokeUserSession revokes one active session of the user, or returns ErrSessionNotFound.
+	RevokeUserSession(ctx context.Context, userID int64, familyUUID uuid.UUID, reason string) error
+	// RevokeOtherSessions revokes every session of the user but keep and returns the revoked families.
+	RevokeOtherSessions(ctx context.Context, userID int64, keep uuid.UUID, reason string) ([]uuid.UUID, error)
 	ListActiveSessions(ctx context.Context, userID int64) ([]*SessionSummary, error)
 	CleanupTokens(ctx context.Context, before time.Time) (int64, error)
 	CreatePasswordResetToken(ctx context.Context, userID int64, hash string, expiresAt time.Time) error
@@ -266,6 +283,9 @@ type AuthService interface {
 	Refresh(ctx context.Context, refreshToken string, meta Metadata) (*TokenPair, error)
 	Logout(ctx context.Context, identity *Identity) error
 	LogoutAll(ctx context.Context, identity *Identity) error
+	LogoutOthers(ctx context.Context, identity *Identity) error
+	RevokeSession(ctx context.Context, identity *Identity, familyUUID uuid.UUID) error
+	ChangePassword(ctx context.Context, identity *Identity, input ChangePasswordInput) error
 	AuthenticateAccess(ctx context.Context, token string) (*Identity, error)
 	ListSessions(ctx context.Context, identity *Identity) ([]*SessionSummary, error)
 	GetTokenDetails(ctx context.Context, token string) (*TokenDetails, error)

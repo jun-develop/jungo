@@ -141,7 +141,7 @@ func (s *UserService) UpdateUser(ctx context.Context, uid uuid.UUID, input domai
 			return err
 		}
 
-		if err := s.recordAudit(ctx, auditlog.ActionUpdate, uid, auditFields(before), auditlog.Changes(input)); err != nil {
+		if err := s.recordAudit(ctx, auditlog.ActionUpdate, uid, auditFields(before), auditFields(user)); err != nil {
 			return err
 		}
 
@@ -203,12 +203,12 @@ func (s *UserService) DeleteUser(ctx context.Context, uid uuid.UUID) error {
 	return nil
 }
 
-// UploadAvatar uploads a new avatar and updates the user record, for the user themself or anyone
+// UploadAvatar uploads a new avatar and updates the user record (and the audit log), for the user themself or anyone
 // authorize allows with users:update. The upload runs outside the transaction so the row is not
 // kept locked during it; inside, authorize runs again (the user's roles may have changed) and the
 // old avatar is read under the row lock, so two uploads at once cannot orphan a file.
 //
-// Flow: authorize -> upload file -> authorize + lock + read old avatar + update (tx) -> drop cached sessions -> delete old file
+// Flow: authorize -> upload file -> authorize + lock + read old avatar + update + audit (tx) -> drop cached sessions -> delete old file
 func (s *UserService) UploadAvatar(ctx context.Context, uid uuid.UUID, file domain.AvatarFile) (*domain.User, error) {
 	if _, err := s.authorize(ctx, uid, domain.UsersUpdate); err != nil {
 		return nil, err
@@ -228,9 +228,11 @@ func (s *UserService) UploadAvatar(ctx context.Context, uid uuid.UUID, file doma
 			return err
 		}
 
-		updated, err = s.repo.Update(ctx, uid, domain.UpdateUserInput{AvatarURL: &newURL})
+		if updated, err = s.repo.Update(ctx, uid, domain.UpdateUserInput{AvatarURL: &newURL}); err != nil {
+			return err
+		}
 
-		return err
+		return s.recordAudit(ctx, auditlog.ActionUpdate, uid, avatarField(previous), avatarField(updated))
 	})
 	if err != nil {
 		s.deleteFile(ctx, newURL)
@@ -249,7 +251,7 @@ func (s *UserService) UploadAvatar(ctx context.Context, uid uuid.UUID, file doma
 // DeleteAvatar clears the avatar URL, then removes the file, for the user themself or anyone
 // authorize allows with users:update.
 //
-// Flow: authorize + lock + read avatar + clear it (tx) -> drop cached sessions -> delete file
+// Flow: authorize + lock + read avatar + clear it + audit (tx) -> drop cached sessions -> delete file
 func (s *UserService) DeleteAvatar(ctx context.Context, uid uuid.UUID) (*domain.User, error) {
 	var previous, updated *domain.User
 	err := s.repo.WithTransaction(ctx, func(ctx context.Context) error {
@@ -263,9 +265,11 @@ func (s *UserService) DeleteAvatar(ctx context.Context, uid uuid.UUID) (*domain.
 		}
 
 		empty := ""
-		updated, err = s.repo.Update(ctx, uid, domain.UpdateUserInput{AvatarURL: &empty})
+		if updated, err = s.repo.Update(ctx, uid, domain.UpdateUserInput{AvatarURL: &empty}); err != nil {
+			return err
+		}
 
-		return err
+		return s.recordAudit(ctx, auditlog.ActionUpdate, uid, avatarField(previous), avatarField(updated))
 	})
 	if err != nil {
 		return nil, err
@@ -344,10 +348,16 @@ func (s *UserService) recordAudit(ctx context.Context, action string, uid uuid.U
 	return s.audit.Record(ctx, auditlog.Entry{Action: action, EntityType: "users", EntityID: uid.String(), Before: before, After: after})
 }
 
-// auditFields returns the user's values the audit log records, by column name.
+// avatarField returns the user's avatar as the audit log records it.
+func avatarField(u *domain.User) map[string]any {
+	return map[string]any{"avatar_url": u.AvatarURL}
+}
+
+// auditFields returns the user's values the audit log records, by column name, as the API shows them
+// (status by name).
 func auditFields(u *domain.User) map[string]any {
 	return map[string]any{
 		"email": u.Email, "first_name": u.FirstName, "last_name": u.LastName,
-		"phone_number": u.PhoneNumber, "avatar_url": u.AvatarURL, "status": u.Status,
+		"phone_number": u.PhoneNumber, "avatar_url": u.AvatarURL, "status": domain.UserStatusName(u.Status),
 	}
 }

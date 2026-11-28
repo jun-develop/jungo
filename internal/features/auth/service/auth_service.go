@@ -18,6 +18,7 @@ import (
 	"github.com/jun-develop/junkit/security"
 	"github.com/jun-develop/junkit/tracer"
 
+	"jungo/internal/common/auditlog"
 	"jungo/internal/config"
 	"jungo/internal/features/auth/domain"
 )
@@ -43,6 +44,7 @@ type AuthServiceParams struct {
 	Users     domain.UserProvider
 	Sealer    security.TokenSealer
 	Hasher    security.PasswordHasher
+	Audit     auditlog.Recorder
 	Logger    *zap.Logger
 	Recaptcha recaptcha.Verifier `optional:"true"`
 	Mailer    mailer.Sender      `optional:"true"`
@@ -57,6 +59,7 @@ type AuthService struct {
 	users      domain.UserProvider
 	sealer     security.TokenSealer
 	hasher     security.PasswordHasher
+	audit      auditlog.Recorder
 	logger     *zap.Logger
 	recaptcha  recaptcha.Verifier
 	mailer     mailer.Sender
@@ -83,6 +86,7 @@ func NewAuthService(p AuthServiceParams) *AuthService {
 		users:      p.Users,
 		sealer:     p.Sealer,
 		hasher:     p.Hasher,
+		audit:      p.Audit,
 		logger:     p.Logger,
 		recaptcha:  p.Recaptcha,
 		mailer:     p.Mailer,

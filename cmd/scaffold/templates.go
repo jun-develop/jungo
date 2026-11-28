@@ -222,13 +222,10 @@ var {{.Camel}}StatusNames = map[int16]string{
 	{{.Pascal}}StatusInactive: "inactive",
 }
 
-// {{.Pascal}}StatusName returns the API name of a status code ("unknown" if unmapped).
+// {{.Pascal}}StatusName returns the API name of a status code. chk_{{.Table}}_status keeps every
+// stored status in {{.Camel}}StatusNames.
 func {{.Pascal}}StatusName(status int16) string {
-	if name, ok := {{.Camel}}StatusNames[status]; ok {
-		return name
-	}
-
-	return "unknown"
+	return {{.Camel}}StatusNames[status]
 }
 
 // Parse{{.Pascal}}Status returns the status code for an API name.
@@ -809,9 +806,11 @@ func ToUpdate{{.Pascal}}Input(req Update{{.Pascal}}Request) domain.Update{{.Pasc
 	return domain.Update{{.Pascal}}Input{Name: req.Name, Status: status}
 }
 
-// ListPASCAL_PLURALRequest binds query parameters for listing PLURAL_WORDS.
+// ListPASCAL_PLURALRequest binds query parameters for listing PLURAL_WORDS, ordered by creation time.
 type ListPASCAL_PLURALRequest struct {
-	pagination.Request
+	pagination.PageRequest
+	Search    string @@form:"search" binding:"omitempty" example:"widget"@@
+	SortOrder string @@form:"sort_order" binding:"omitempty,oneof=asc desc" example:"desc"@@
 }
 
 // To{{.Pascal}}ListFilter converts ListPASCAL_PLURALRequest to domain filter.
@@ -828,10 +827,10 @@ func To{{.Pascal}}ListFilter(req ListPASCAL_PLURALRequest) domain.{{.Pascal}}Lis
 type {{.Pascal}}Response struct {
 	UUID      uuid.UUID  @@json:"uuid"@@
 	Name      string     @@json:"name"@@
-	Status    string     @@json:"status"@@
+	Status    string     @@json:"status" enum:"active inactive"@@
 	Active    bool       @@json:"active"@@
 	CreatedAt time.Time  @@json:"created_at"@@
-	UpdatedAt *time.Time @@json:"updated_at,omitempty"@@
+	UpdatedAt *time.Time @@json:"updated_at"@@
 }
 
 // New{{.Pascal}}Response converts domain.{{.Pascal}} to {{.Pascal}}Response.
@@ -922,7 +921,7 @@ func (h *{{.Pascal}}Handler) ListPASCAL_PLURAL(ctx *gin.Context) {
 		return
 	}
 
-	req.SetDefaults("created_at", "desc")
+	req.SetDefaults()
 
 	items, total, err := h.service.ListPASCAL_PLURAL(ctx.Request.Context(), v1dto.To{{.Pascal}}ListFilter(req))
 	if err != nil {
@@ -979,6 +978,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/jun-develop/junkit/apidoc"
+	"github.com/jun-develop/junkit/response"
 
 	"{{.Module}}/internal/features/{{.Name}}/domain"
 	v1dto "{{.Module}}/internal/features/{{.Name}}/dto/v1"
@@ -1021,13 +1021,15 @@ func (r *{{.Pascal}}Routes) Register(group *gin.RouterGroup) {
 // Docs implements router.Documented; it describes every route Register adds (the API docs at /docs).
 func (r *{{.Pascal}}Routes) Docs() []apidoc.Route {
 	item := v1dto.{{.Pascal}}Response{}
+	notFound := []*response.AppError{domain.Err{{.Pascal}}NotFound}
 
+	// Errors lists what the handler and service answer; the router adds the middlewares' own.
 	return []apidoc.Route{
-		{Method: http.MethodPost, Path: "/{{.Plural}}", Summary: "Create a {{.Name}}", Body: v1dto.Create{{.Pascal}}Request{}, Status: http.StatusCreated, Response: item},
-		{Method: http.MethodGet, Path: "/{{.Plural}}", Summary: "List {{.Plural}}", Query: v1dto.ListPASCAL_PLURALRequest{}, Response: item, Paginated: true},
-		{Method: http.MethodGet, Path: "/{{.Plural}}/:uuid", Summary: "Get a {{.Name}}", Response: item},
-		{Method: http.MethodPatch, Path: "/{{.Plural}}/:uuid", Summary: "Update a {{.Name}}", Body: v1dto.Update{{.Pascal}}Request{}, Response: item},
-		{Method: http.MethodDelete, Path: "/{{.Plural}}/:uuid", Summary: "Delete a {{.Name}}"},
+		{ID: "create{{.Pascal}}", Method: http.MethodPost, Path: "/{{.Plural}}", Summary: "Create a {{.Name}}", Body: v1dto.Create{{.Pascal}}Request{}, Status: http.StatusCreated, Response: item},
+		{ID: "listPASCAL_PLURAL", Method: http.MethodGet, Path: "/{{.Plural}}", Summary: "List {{.Plural}}", Query: v1dto.ListPASCAL_PLURALRequest{}, Response: item, Paginated: true},
+		{ID: "get{{.Pascal}}", Method: http.MethodGet, Path: "/{{.Plural}}/:uuid", Summary: "Get a {{.Name}}", Response: item, Errors: notFound},
+		{ID: "update{{.Pascal}}", Method: http.MethodPatch, Path: "/{{.Plural}}/:uuid", Summary: "Update a {{.Name}}", Body: v1dto.Update{{.Pascal}}Request{}, Response: item, Errors: notFound},
+		{ID: "delete{{.Pascal}}", Method: http.MethodDelete, Path: "/{{.Plural}}/:uuid", Summary: "Delete a {{.Name}}", Errors: notFound},
 	}
 }
 `

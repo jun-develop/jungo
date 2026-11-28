@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS auth_tokens (
 COMMENT ON COLUMN auth_tokens.type IS '1 = access token, 2 = refresh token';
 COMMENT ON COLUMN auth_tokens.hash IS 'SHA-256 hex of the raw token; the raw token is never stored';
 COMMENT ON COLUMN auth_tokens.family_uuid IS 'Login session: groups the access/refresh tokens revoked together';
-COMMENT ON COLUMN auth_tokens.revoked_reason IS 'logout | refresh | reuse | rotated | admin | user_disabled | password_reset';
+COMMENT ON COLUMN auth_tokens.revoked_reason IS 'logout | refresh | reuse | rotated | admin | user_disabled | password_reset | password_change';
 
 -- Not partial: GetSessionByHash reads a family's latest pair, revoked rows included.
 CREATE INDEX IF NOT EXISTS idx_auth_tokens_family ON auth_tokens (family_uuid, type, id DESC);

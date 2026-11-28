@@ -6,7 +6,9 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/jun-develop/junkit/apidoc"
+	"github.com/jun-develop/junkit/response"
 
+	"jungo/internal/common/actor"
 	"jungo/internal/features/access/domain"
 	v1dto "jungo/internal/features/access/dto/v1"
 	v1handler "jungo/internal/features/access/handler/v1"
@@ -54,16 +56,45 @@ func (r *AccessRoutes) Register(group *gin.RouterGroup) {
 // Docs implements router.Documented.
 func (r *AccessRoutes) Docs() []apidoc.Route {
 	role := v1dto.RoleResponse{}
+	// changeRole are the errors of every change to an existing role.
+	changeRole := []*response.AppError{domain.ErrRoleNotFound, domain.ErrSystemRole, domain.ErrEscalation}
 
 	return []apidoc.Route{
-		{Method: http.MethodGet, Path: "/permissions", Summary: "List permissions by group", Response: []v1dto.PermissionGroupResponse{}},
-		{Method: http.MethodGet, Path: "/roles", Summary: "List roles", Response: []v1dto.RoleResponse{}},
-		{Method: http.MethodPost, Path: "/roles", Summary: "Create a role", Description: "You can only grant permissions you hold.", Body: v1dto.CreateRoleRequest{}, Status: http.StatusCreated, Response: role},
-		{Method: http.MethodGet, Path: "/roles/:uuid", Summary: "Get a role", Response: role},
-		{Method: http.MethodPatch, Path: "/roles/:uuid", Summary: "Rename a role", Body: v1dto.RenameRoleRequest{}, Response: role},
-		{Method: http.MethodPut, Path: "/roles/:uuid/permissions", Summary: "Replace a role's permissions", Description: "You can only grant permissions you hold.", Body: v1dto.ReplaceRolePermissionsRequest{}, Response: role},
-		{Method: http.MethodDelete, Path: "/roles/:uuid", Summary: "Delete a role"},
-		{Method: http.MethodGet, Path: "/users/:uuid/roles", Summary: "List a user's roles", Response: []v1dto.UserRoleResponse{}},
-		{Method: http.MethodPut, Path: "/users/:uuid/roles", Summary: "Set a user's roles", Description: "You must hold every permission of the user and of each role you add or remove.", Body: v1dto.SetUserRolesRequest{}, Response: []v1dto.UserRoleResponse{}},
+		{ID: "listPermissions", Method: http.MethodGet, Path: "/permissions", Summary: "List permissions by group", Response: []v1dto.PermissionGroupResponse{}},
+		{ID: "listRoles", Method: http.MethodGet, Path: "/roles", Summary: "List roles", Query: v1dto.ListRolesRequest{}, Response: role, Paginated: true},
+		{
+			ID: "createRole", Method: http.MethodPost, Path: "/roles", Summary: "Create a role", Description: "You can only grant permissions you hold.",
+			Body: v1dto.CreateRoleRequest{}, Status: http.StatusCreated, Response: role,
+			Errors: []*response.AppError{
+				domain.ErrInvalidRoleCode, domain.ErrInvalidRoleName, domain.ErrUnknownPermission, domain.ErrEscalation, domain.ErrRoleAlreadyExists,
+			},
+		},
+		{
+			ID: "getRole", Method: http.MethodGet, Path: "/roles/:uuid", Summary: "Get a role", Response: role,
+			Errors: []*response.AppError{domain.ErrRoleNotFound},
+		},
+		{
+			ID: "renameRole", Method: http.MethodPatch, Path: "/roles/:uuid", Summary: "Rename a role", Body: v1dto.RenameRoleRequest{}, Response: role,
+			Errors: append([]*response.AppError{domain.ErrInvalidRoleName}, changeRole...),
+		},
+		{
+			ID: "replaceRolePermissions", Method: http.MethodPut, Path: "/roles/:uuid/permissions", Summary: "Replace a role's permissions",
+			Description: "You can only grant permissions you hold.", Body: v1dto.ReplaceRolePermissionsRequest{}, Response: role,
+			Errors: append([]*response.AppError{domain.ErrUnknownPermission}, changeRole...),
+		},
+		{ID: "deleteRole", Method: http.MethodDelete, Path: "/roles/:uuid", Summary: "Delete a role", Errors: changeRole},
+		{
+			ID: "listUserRoles", Method: http.MethodGet, Path: "/users/:uuid/roles", Summary: "List a user's roles", Response: []v1dto.UserRoleResponse{},
+			Errors: []*response.AppError{domain.ErrUserNotFound},
+		},
+		{
+			ID: "setUserRoles", Method: http.MethodPut, Path: "/users/:uuid/roles", Summary: "Set a user's roles",
+			Description: "You must hold every permission of the user and of each role you add or remove.",
+			Body:        v1dto.SetUserRolesRequest{}, Response: []v1dto.UserRoleResponse{},
+			Errors: []*response.AppError{
+				domain.ErrUserNotFound, domain.ErrRoleNotFound, domain.ErrCannotChangeOwnRoles, domain.ErrSystemRole,
+				actor.ErrCannotManageStrongerUser, domain.ErrEscalation,
+			},
+		},
 	}
 }

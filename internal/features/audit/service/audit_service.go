@@ -25,13 +25,18 @@ func NewAuditService(repo domain.AuditRepository) *AuditService {
 }
 
 // Record implements auditlog.Recorder: the actor is the logged-in user in ctx (none for a console
-// command), and the trace ID links the entry to the request's technical logs.
+// command), and the trace ID links the entry to the request's technical logs. A change that compares
+// values (Before and After both set) and changed none of them is not recorded.
 func (s *AuditService) Record(ctx context.Context, e auditlog.Entry) error {
 	entry := &domain.AuditLog{
 		Action:     e.Action,
 		EntityType: e.EntityType,
 		EntityID:   e.EntityID,
 		Changes:    diff(e.Before, e.After),
+	}
+
+	if len(entry.Changes) == 0 && e.Before != nil && e.After != nil {
+		return nil
 	}
 
 	if a, ok := actor.From(ctx); ok {

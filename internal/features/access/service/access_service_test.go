@@ -39,8 +39,8 @@ package service
 // 23  TestAccessService_GetRole_LooksUpOneRoleWithUserCount                          Known role                                  Asks for that role only, with its user count
 // 24  TestAccessService_GetRole_LooksUpOneRoleWithUserCount                          Unknown role                                ErrRoleNotFound
 // 25  TestAccessService_GetRole_LooksUpOneRoleWithUserCount                          Roles unreadable                            Database error
-// 26  TestAccessService_ListRoles_ListsEveryRoleWithUserCounts                       Two roles                                   Asks for every role, with user counts
-// 27  TestAccessService_ListRoles_ListsEveryRoleWithUserCounts                       Roles unreadable                            Database error
+// 26  TestAccessService_ListRoles_PassesFilterToRepository                           A page of roles                             Repository receives the filter; its page and total returned
+// 27  TestAccessService_ListRoles_PassesFilterToRepository                           Roles unreadable                            Database error
 // 28  TestAccessService_RenameRole_UpdatesTrimmedName                                Name with surrounding spaces                Role's name updated, trimmed; one audit entry
 // 29  TestAccessService_RenameRole_RejectsInvalidChanges                             Blank name                                  ErrInvalidRoleName
 // 30  TestAccessService_RenameRole_RejectsInvalidChanges                             Unknown role                                ErrRoleNotFound
@@ -65,8 +65,8 @@ package service
 // 49  TestAccessService_ListUserRoles_ReturnsRolesOfTheUser                          Known user                                  Asks for that user's roles
 // 50  TestAccessService_ListUserRoles_ReturnsRolesOfTheUser                          Unknown user                                ErrUserNotFound
 // 51  TestAccessService_ListUserRoles_ReturnsRolesOfTheUser                          User roles unreadable                       Database error
-// 52  TestAccessService_SetUserRoles_ReplacesRolesAndInvalidatesUser                 Assign manager and extra (extra twice)      Each stored once; user invalidated; one audit entry
-// 53  TestAccessService_SetUserRoles_ReplacesRolesAndInvalidatesUser                 Clear a super_admin + manager user          No role stored; super_admin not checked; one audit entry
+// 52  TestAccessService_SetUserRoles_ReplacesRolesAndInvalidatesUser                 Assign manager and extra (extra twice)      Each stored once; user invalidated; audit roles [] -> [extra manager]
+// 53  TestAccessService_SetUserRoles_ReplacesRolesAndInvalidatesUser                 Clear a super_admin + manager user          No role stored; super_admin not checked; audit roles [manager] -> []
 // 54  TestAccessService_SetUserRoles_RejectsInvalidChanges                           Actor changes their own roles               ErrCannotChangeOwnRoles
 // 55  TestAccessService_SetUserRoles_RejectsInvalidChanges                           Unknown role                                ErrRoleNotFound
 // 56  TestAccessService_SetUserRoles_RejectsInvalidChanges                           Unknown user                                ErrUserNotFound
@@ -82,6 +82,7 @@ package service
 
 import (
 	"context"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -432,38 +433,38 @@ func TestAccessService_GetRole_LooksUpOneRoleWithUserCount(t *testing.T) {
 	})
 }
 
-func TestAccessService_ListRoles_ListsEveryRoleWithUserCounts(t *testing.T) {
-	t.Run("two roles", func(t *testing.T) {
-		var gotUIDs []uuid.UUID
-		var gotCount bool
+func TestAccessService_ListRoles_PassesFilterToRepository(t *testing.T) {
+	t.Run("a page of roles", func(t *testing.T) {
+		filter := domain.RoleListFilter{Search: "man", SortBy: "user_count", SortOrder: "asc", Limit: 10, Offset: 10}
+		var got domain.RoleListFilter
 		repo := &fakeRepository{
-			ListRolesFunc: func(_ context.Context, uids []uuid.UUID, countUsers bool) ([]*domain.Role, error) {
-				gotUIDs, gotCount = uids, countUsers
-				return []*domain.Role{superAdmin(), manager()}, nil
+			ListRolesPageFunc: func(_ context.Context, f domain.RoleListFilter) ([]*domain.Role, int64, error) {
+				got = f
+				return []*domain.Role{manager()}, 11, nil
 			},
 		}
 
-		_, err := newTestService(t, AccessServiceParams{Repo: repo}).ListRoles(context.Background())
+		roles, total, err := newTestService(t, AccessServiceParams{Repo: repo}).ListRoles(context.Background(), filter)
 
 		if err != nil {
 			t.Fatalf("ListRoles() error = %v", err)
 		}
 
-		if gotUIDs != nil {
-			t.Errorf("repository asked for roles %v, want nil (every role)", gotUIDs)
+		if got != filter {
+			t.Errorf("repository received %+v, want %+v", got, filter)
 		}
 
-		if !gotCount {
-			t.Error("repository asked without user counts, want with")
+		if len(roles) != 1 || total != 11 {
+			t.Errorf("ListRoles() = %d roles, total %d; want 1, total 11", len(roles), total)
 		}
 	})
 
 	t.Run("roles unreadable", func(t *testing.T) {
 		repo := &fakeRepository{
-			ListRolesFunc: func(context.Context, []uuid.UUID, bool) ([]*domain.Role, error) { return nil, errDB },
+			ListRolesPageFunc: func(context.Context, domain.RoleListFilter) ([]*domain.Role, int64, error) { return nil, 0, errDB },
 		}
 
-		_, err := newTestService(t, AccessServiceParams{Repo: repo}).ListRoles(context.Background())
+		_, _, err := newTestService(t, AccessServiceParams{Repo: repo}).ListRoles(context.Background(), domain.RoleListFilter{Limit: 10})
 
 		wantErr(t, err, errDB)
 	})
@@ -853,18 +854,24 @@ func TestAccessService_SetUserRoles_ReplacesRolesAndInvalidatesUser(t *testing.T
 		current []*domain.Role
 		wanted  []uuid.UUID
 		wantIDs []int64
+		// wantBefore and wantAfter are the role codes the audit entry records; system roles are left out.
+		wantBefore, wantAfter []string
 	}{
 		{
-			name:    "assign manager and extra (extra twice)",
-			current: []*domain.Role{lockedAdmin},
-			wanted:  []uuid.UUID{managerUUID, extraUUID, extraUUID},
-			wantIDs: []int64{2, 3},
+			name:       "assign manager and extra (extra twice)",
+			current:    []*domain.Role{lockedAdmin},
+			wanted:     []uuid.UUID{managerUUID, extraUUID, extraUUID},
+			wantIDs:    []int64{2, 3},
+			wantBefore: []string{},
+			wantAfter:  []string{"extra", "manager"},
 		},
 		{
-			name:    "clear a super_admin + manager user",
-			current: []*domain.Role{lockedAdmin, manager(usersRead)},
-			wanted:  []uuid.UUID{},
-			wantIDs: nil,
+			name:       "clear a super_admin + manager user",
+			current:    []*domain.Role{lockedAdmin, manager(usersRead)},
+			wanted:     []uuid.UUID{},
+			wantIDs:    nil,
+			wantBefore: []string{"manager"},
+			wantAfter:  []string{},
 		},
 	}
 
@@ -909,6 +916,12 @@ func TestAccessService_SetUserRoles_ReplacesRolesAndInvalidatesUser(t *testing.T
 			}
 
 			wantEntry(t, audit, "set_roles", "users", targetUUID)
+
+			// Never nil: the entry shows [] for no role, not null.
+			e := audit.entries[0]
+			if before, after := e.Before["roles"], e.After["roles"]; !reflect.DeepEqual(before, tt.wantBefore) || !reflect.DeepEqual(after, tt.wantAfter) {
+				t.Errorf("audit roles = %#v -> %#v, want %#v -> %#v", before, after, tt.wantBefore, tt.wantAfter)
+			}
 		})
 	}
 }

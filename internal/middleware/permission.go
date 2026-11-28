@@ -3,7 +3,6 @@ package middleware
 import (
 	"context"
 	"fmt"
-	"net/http"
 	"unsafe"
 
 	"github.com/gin-gonic/gin"
@@ -133,7 +132,7 @@ func (g *Guard) loadActor(c *gin.Context) (*actor.Actor, bool) {
 	subject, ok := security.GetIdentity[Subject](c)
 	if !ok {
 		// The route is missing BearerAuth; fail closed.
-		g.responder.Send(c, http.StatusUnauthorized, "unauthorized_token")
+		g.responder.Error(c, ErrUnauthorizedToken)
 		c.Abort()
 
 		return nil, false

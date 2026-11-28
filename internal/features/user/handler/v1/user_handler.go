@@ -4,12 +4,14 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 
 	"github.com/jun-develop/junkit/pagination"
 	"github.com/jun-develop/junkit/response"
 	"github.com/jun-develop/junkit/upload"
 	"github.com/jun-develop/junkit/validation"
 
+	"jungo/internal/common/actor"
 	"jungo/internal/features/user/domain"
 	v1dto "jungo/internal/features/user/dto/v1"
 )
@@ -72,7 +74,7 @@ func (h *UserHandler) ListUsers(ctx *gin.Context) {
 		return
 	}
 
-	req.SetDefaults("created_at", "desc")
+	req.SetDefaults()
 
 	users, total, err := h.service.ListUsers(ctx.Request.Context(), v1dto.ToUserListFilter(req))
 	if err != nil {
@@ -122,20 +124,56 @@ func (h *UserHandler) DeleteUser(ctx *gin.Context) {
 
 // UploadAvatar handles POST /users/:uuid/avatar.
 func (h *UserHandler) UploadAvatar(ctx *gin.Context) {
-	uid, ok := validation.ParseUUID(ctx, h.responder, h.validator)
-	if !ok {
+	if uid, ok := validation.ParseUUID(ctx, h.responder, h.validator); ok {
+		h.uploadAvatar(ctx, uid)
+	}
+}
+
+// DeleteAvatar handles DELETE /users/:uuid/avatar.
+func (h *UserHandler) DeleteAvatar(ctx *gin.Context) {
+	if uid, ok := validation.ParseUUID(ctx, h.responder, h.validator); ok {
+		h.deleteAvatar(ctx, uid)
+	}
+}
+
+// UpdateMe handles PATCH /auth/me: the logged-in user changes their own profile, which needs no
+// permission.
+func (h *UserHandler) UpdateMe(ctx *gin.Context) {
+	var req v1dto.UpdateMeRequest
+	if !validation.BindJSON(ctx, h.responder, h.validator, &req) {
 		return
 	}
 
+	user, err := h.service.UpdateUser(ctx.Request.Context(), me(ctx), v1dto.ToUpdateMeInput(req))
+	if err != nil {
+		h.responder.Error(ctx, err)
+		return
+	}
+
+	h.responder.SendWithData(ctx, http.StatusOK, "user_updated", v1dto.NewUserResponse(user))
+}
+
+// UploadMyAvatar handles POST /auth/me/avatar.
+func (h *UserHandler) UploadMyAvatar(ctx *gin.Context) {
+	h.uploadAvatar(ctx, me(ctx))
+}
+
+// DeleteMyAvatar handles DELETE /auth/me/avatar.
+func (h *UserHandler) DeleteMyAvatar(ctx *gin.Context) {
+	h.deleteAvatar(ctx, me(ctx))
+}
+
+// uploadAvatar stores the request's "avatar" file as the avatar of user uid.
+func (h *UserHandler) uploadAvatar(ctx *gin.Context, uid uuid.UUID) {
 	fileHeader, err := ctx.FormFile("avatar")
 	if err != nil {
-		h.responder.Send(ctx, http.StatusBadRequest, "invalid_avatar_file")
+		h.responder.Error(ctx, domain.ErrInvalidAvatarFile)
 		return
 	}
 
 	file, err := upload.Open(fileHeader, avatarRule)
 	if err != nil {
-		h.responder.Send(ctx, http.StatusBadRequest, "invalid_avatar_file")
+		h.responder.Error(ctx, domain.ErrInvalidAvatarFile)
 		return
 	}
 
@@ -153,13 +191,8 @@ func (h *UserHandler) UploadAvatar(ctx *gin.Context) {
 	h.responder.SendWithData(ctx, http.StatusOK, "avatar_uploaded", v1dto.NewUserResponse(user))
 }
 
-// DeleteAvatar handles DELETE /users/:uuid/avatar.
-func (h *UserHandler) DeleteAvatar(ctx *gin.Context) {
-	uid, ok := validation.ParseUUID(ctx, h.responder, h.validator)
-	if !ok {
-		return
-	}
-
+// deleteAvatar removes the avatar of user uid.
+func (h *UserHandler) deleteAvatar(ctx *gin.Context, uid uuid.UUID) {
 	user, err := h.service.DeleteAvatar(ctx.Request.Context(), uid)
 	if err != nil {
 		h.responder.Error(ctx, err)
@@ -167,4 +200,10 @@ func (h *UserHandler) DeleteAvatar(ctx *gin.Context) {
 	}
 
 	h.responder.SendWithData(ctx, http.StatusOK, "avatar_deleted", v1dto.NewUserResponse(user))
+}
+
+// me returns the logged-in user's UUID; Guard.Authenticated stored the actor before the handler runs.
+func me(ctx *gin.Context) uuid.UUID {
+	a, _ := actor.From(ctx.Request.Context())
+	return a.UserUUID
 }

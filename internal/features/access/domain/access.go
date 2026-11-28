@@ -27,6 +27,17 @@ type CreateRoleInput struct {
 	Permissions []string
 }
 
+// RoleListFilter holds parameters for searching, sorting and paginating roles.
+type RoleListFilter struct {
+	// Search matches code or name.
+	Search string
+	// SortBy is name, code, created_at or user_count; SortOrder is asc or desc.
+	SortBy    string
+	SortOrder string
+	Limit     int32
+	Offset    int32
+}
+
 // AccessRepository defines database operations for roles and permissions.
 type AccessRepository interface {
 	WithTransaction(ctx context.Context, fn func(ctx context.Context) error) error
@@ -35,6 +46,8 @@ type AccessRepository interface {
 	ListPermissions(ctx context.Context) ([]Permission, error)
 	CreateRole(ctx context.Context, code, name string) (*Role, error)
 	ListRoles(ctx context.Context, uuids []uuid.UUID, countUsers bool) ([]*Role, error)
+	// ListRolesPage returns a page of roles with their user counts, and the total for pagination.
+	ListRolesPage(ctx context.Context, filter RoleListFilter) ([]*Role, int64, error)
 	LockRoles(ctx context.Context, uuids []uuid.UUID) error
 	UpdateRoleName(ctx context.Context, roleID int64, name string) error
 	DeleteRole(ctx context.Context, roleID int64) error
@@ -66,7 +79,7 @@ type AccessService interface {
 	ListPermissionGroups(ctx context.Context) ([]PermissionGroup, error)
 	CreateRole(ctx context.Context, input CreateRoleInput) (*Role, error)
 	GetRole(ctx context.Context, uid uuid.UUID) (*Role, error)
-	ListRoles(ctx context.Context) ([]*Role, error)
+	ListRoles(ctx context.Context, filter RoleListFilter) ([]*Role, int64, error)
 	RenameRole(ctx context.Context, uid uuid.UUID, name string) (*Role, error)
 	ReplaceRolePermissions(ctx context.Context, uid uuid.UUID, codes []string) (*Role, error)
 	DeleteRole(ctx context.Context, uid uuid.UUID) error

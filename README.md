@@ -305,11 +305,17 @@ login ──► access + refresh token
 | `POST` | `/api/v1/auth/login` | — | Log in, get a token pair |
 | `POST` | `/api/v1/auth/refresh` | refresh token (body) | Exchange the refresh token for a new pair |
 | `GET` | `/api/v1/auth/me` | access token | Current user + session info + `permissions` (for the UI) |
+| `PATCH` | `/api/v1/auth/me` | access token | Edit your own `first_name`, `last_name`, `phone_number` (no permission needed) |
+| `POST` / `DELETE` | `/api/v1/auth/me/avatar` | access token | Upload (multipart `avatar`) or remove your own avatar |
+| `POST` | `/api/v1/auth/change-password` | access token | Change your password (`current_password`, `new_password`); logs out your other devices |
 | `GET` | `/api/v1/auth/sessions` | access token | Devices where the user is logged in (`current: true` = this one) |
+| `DELETE` | `/api/v1/auth/sessions/:family_uuid` | access token | Log out one of your devices (this one = a logout) |
 | `POST` | `/api/v1/auth/logout` | access token | Log out this device |
+| `POST` | `/api/v1/auth/logout-others` | access token | Log out every other device, keep this one |
 | `POST` | `/api/v1/auth/logout-all` | access token | Log out every device |
 | `GET` | `/api/v1/permissions` | access token + `roles:read` | Every permission, grouped for the UI |
-| `GET` | `/api/v1/roles`, `/api/v1/roles/:uuid` | `roles:read` | Roles with permissions and user count |
+| `GET` | `/api/v1/roles` | `roles:read` | A page of roles with permissions and user count, like `/users`: `page`, `page_size`, `search` (code or name), `sort_by=name\|code\|created_at\|user_count`, `sort_order` |
+| `GET` | `/api/v1/roles/:uuid` | `roles:read` | A role with permissions and user count |
 | `POST` | `/api/v1/roles` | `roles:create` | Create a role (`code`, `name`, optional `permissions`) |
 | `PATCH` | `/api/v1/roles/:uuid` | `roles:update` | Rename a role (the code never changes) |
 | `PUT` | `/api/v1/roles/:uuid/permissions` | `roles:update` | Replace a role's permissions |
@@ -382,6 +388,30 @@ curl -X POST http://localhost:<API_SERVER_PORT>/api/v1/auth/logout \
   -H "Authorization: Bearer <access_token>"
 ```
 
+### Your own account
+
+A logged-in user manages their own profile and devices without any permission:
+
+```bash
+# Rename yourself (email, status and roles cannot be changed here); answers with the user, as GET /users/:uuid does
+curl -X PATCH http://localhost:<API_SERVER_PORT>/api/v1/auth/me \
+  -H "Authorization: Bearer <access_token>" -H "Content-Type: application/json" \
+  -d '{"first_name": "Ann"}'
+
+# Change your password: every other device is logged out, this one stays
+curl -X POST http://localhost:<API_SERVER_PORT>/api/v1/auth/change-password \
+  -H "Authorization: Bearer <access_token>" -H "Content-Type: application/json" \
+  -d '{"current_password": "Password@123", "new_password": "N3w-Password!"}'
+
+# Log out one device, by the family_uuid GET /auth/sessions lists
+curl -X DELETE http://localhost:<API_SERVER_PORT>/api/v1/auth/sessions/<family_uuid> \
+  -H "Authorization: Bearer <access_token>"
+```
+
+A wrong `current_password` counts as a failed login from the client's IP (the same limits as
+`/auth/login`), so a stolen access token cannot be used to guess the password. A `family_uuid` that
+is not one of your active sessions, someone else's included, is 404 `session_not_found`.
+
 ### Errors clients should handle
 
 Errors look like this:
@@ -406,6 +436,9 @@ may change, while `reason` is the error's fixed key. Every error response carrie
 | 401 | `invalid_token_type` | Invalid token type | A refresh token was sent as `Bearer`; use the access token |
 | 401 | `invalid_credentials` · `invalid_credentials_warning` | Invalid email or password (…) | Wrong credentials; the warning variant means the IP is close to being blocked |
 | 422 | `password_too_long` | Password is too long… | Over 72 bytes (bcrypt's limit); accented characters count as several bytes |
+| 400 | `invalid_current_password` | Current password is incorrect | `POST /auth/change-password`: ask for the current password again |
+| 422 | `new_password_same_as_current` | New password must differ from the current one | `POST /auth/change-password`: pick another password |
+| 404 | `session_not_found` | Session not found | `DELETE /auth/sessions/:family_uuid`: the session already ended; refresh the list |
 | 403 | `user_account_is_not_active` | Your account is not active | Account disabled |
 | 429 | `too_many_login_attempts` · `ip_temporarily_blocked` | Too many failed login attempts… · Your IP has been temporarily blocked… | Too many failed logins; wait |
 
@@ -567,7 +600,8 @@ curl -X POST http://localhost:<API_SERVER_PORT>/api/v1/auth/reset-password \
 - **Several app instances**: without Redis nothing is cached, so a logout, a disabled user or a removed permission applies on every instance at once; only login limits are counted per instance (in memory). Enable Redis (`CACHE_REDIS_ENABLED=true`) to save the database reads and share login limits.
 - **Disabling or deleting a user** logs them out of every device immediately, in the same
   transaction as the change. A profile change (name, avatar) drops their cached sessions, so
-  `/auth/me` shows it at once.
+  `/auth/me` shows it at once. **Changing a password** logs out every other device of the user in the
+  same transaction (`revoked_reason = password_change`); a password reset logs out every device.
 
 ### Permissions
 
@@ -595,7 +629,13 @@ set of permissions stored in the database; a user can hold several roles and get
   is 404, so the API does not reveal which users exist. Changing or deleting someone else also needs
   every permission they hold (403 `cannot_manage_stronger_user`): a manager cannot disable an admin,
   and only a `super_admin` can act on a `super_admin`. No one deletes themself
-  (403 `cannot_delete_self`), so the last `super_admin` always stays.
+  (403 `cannot_delete_self`), so the last `super_admin` always stays. `PATCH /auth/me` and
+  `/auth/me/avatar` are the same changes on yourself, for clients that do not know your UUID.
+- **Users list**: `GET /api/v1/users` (needs `users:read`) filters by `search` (email or name),
+  `status=active|inactive` and `role_uuid` (repeatable: users holding any of those roles; an unknown
+  UUID matches no one), and sorts by `sort_by=created_at|email|first_name|last_name|status`. Every
+  user in a response carries its `roles` (`uuid`, `code`, `name`, `is_system`, by name), read for a
+  whole page in one query.
 - **Cache**: with Redis a user's permissions are cached for `AUTH_PERMISSION_CACHE_TTL` (60s); role
   changes made through the API invalidate it at once on every instance. Without Redis they are read
   from the database on every request. Changes that hand out or take away access (role edits, role
@@ -862,8 +902,15 @@ them, and review checks them.
   (nil for a create) and `After` (nil for a delete), never a secret; the log stores each value that
   changed as `{"name": {"before": "Old", "after": "New"}}`. For a partial-update input,
   `auditlog.Changes(input)` builds `After` from the fields set (tag a secret field `audit:"-"`).
+  Record values as the API shows them (a user's `status` is `"active"`, not `1`; an empty list is
+  `[]`, not null). A change whose `Before` and `After` hold the same values is not recorded; an
+  event with neither (`change_password`) is, with empty `changes`.
   Users and roles are recorded today; admins with `audit_logs:read` read the entries at
-  `GET /api/v1/audit-logs?entity_type=users&entity_id=<uuid>` (or `actor_uuid=`).
+  `GET /api/v1/audit-logs?entity_type=users&entity_id=<uuid>`, filtered by `actor_uuid`, `action`
+  (repeatable), `from`/`to` (RFC 3339, inclusive) and `search` (the actor's email or name), newest
+  first unless `sort_order=asc`. Each entry carries its `actor` (`uuid`, `email`, `first_name`,
+  `last_name`; deleted users included, null for a console command) and an `entity_label` (a user's
+  email, a role's name), so a client needs no other read to show it.
   The audit feature is optional: remove `audit.Module` from `internal/app/fx.go` and the app gives
   the features `auditlog.Nop`, a Recorder that records nothing; no feature changes.
 
@@ -899,7 +946,11 @@ them, and review checks them.
   that names a file or a test must stay true.
 - **Tests**: service tests use Func-field fakes (`CreateFunc`, ...) and `t.Run` cases, named
   `Test<Type>_<Method>[_<Behaviour>]`. A fake never re-implements SQL: what the database decides
-  (login and refresh in PL/pgSQL, token cleanup) is not covered by service tests. See `TESTING.md`.
+  (login and refresh in PL/pgSQL, token cleanup) is not covered by service tests. A query whose
+  filtering is the point gets a repository test on a real database (`dbtest.Open`, which skips
+  unless `TEST_DATABASE_URL` is set, and `dbtest.InRollback`, which leaves nothing behind):
+  `TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5432/jungo_test?sslmode=disable go test ./...`.
+  See `TESTING.md`.
 - **Migrations**: `NNNNNN_<what>.up.sql` with a matching `.down.sql`; permissions are inserted by
   migrations, never seeders; seeders hold development demo data only. Tables use the shared
   `f_set_updated_at()` trigger.

@@ -2,7 +2,6 @@ package middleware
 
 import (
 	"context"
-	"net/http"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -29,6 +28,18 @@ func (f AuthenticatorFunc[T]) Authenticate(ctx context.Context, token string) (T
 // InternalSecretHeader carries AUTH_INTERNAL_SECRET on service-to-service calls.
 const InternalSecretHeader = "X-Internal-Secret"
 
+// Errors these middlewares answer with, exported for the API docs.
+var (
+	// ErrUnauthorizedToken answers a request without a bearer token.
+	ErrUnauthorizedToken = response.New(response.Unauthorized, "unauthorized_token")
+	// ErrForbiddenInternal answers an internal request without the right secret.
+	ErrForbiddenInternal = response.New(response.Forbidden, "forbidden_internal_access")
+)
+
+// AuthErrors are the errors the Authenticate middleware can answer with, for the API docs. The auth
+// feature provides it next to Authenticate, since its Authenticator decides most of them.
+type AuthErrors []*response.AppError
+
 // Authenticate is the bearer-token middleware the auth feature provides. Routers depend on this
 // type, not on the auth feature, to protect their routes.
 //
@@ -49,7 +60,7 @@ func BearerAuth[T any](a Authenticator[T], responder response.Responder) gin.Han
 	return func(c *gin.Context) {
 		token, ok := BearerToken(c)
 		if !ok {
-			responder.Send(c, http.StatusUnauthorized, "unauthorized_token")
+			responder.Error(c, ErrUnauthorizedToken)
 			c.Abort()
 
 			return
@@ -98,7 +109,7 @@ func BearerToken(c *gin.Context) (string, bool) {
 func RequireSecret(header, secret string, responder response.Responder) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if secret == "" || !security.SecureEqual(c.GetHeader(header), secret) {
-			responder.Send(c, http.StatusForbidden, "forbidden_internal_access")
+			responder.Error(c, ErrForbiddenInternal)
 			c.Abort()
 
 			return

@@ -19,7 +19,8 @@ CREATE TABLE IF NOT EXISTS users (
     deleted_at    TIMESTAMPTZ,
 
     CONSTRAINT uq_users_uuid UNIQUE (uuid),
-    CONSTRAINT chk_users_email_lowercase CHECK (email = lower(email))
+    CONSTRAINT chk_users_email_lowercase CHECK (email = lower(email)),
+    CONSTRAINT chk_users_status CHECK (status IN (1, 2))
 );
 
 -- ListUsers pages active users by (created_at, id).

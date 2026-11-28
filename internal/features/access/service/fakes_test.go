@@ -78,6 +78,7 @@ type fakeRepository struct {
 
 	CreateRoleFunc             func(ctx context.Context, code, name string) (*domain.Role, error)
 	ListRolesFunc              func(ctx context.Context, uids []uuid.UUID, countUsers bool) ([]*domain.Role, error)
+	ListRolesPageFunc          func(ctx context.Context, filter domain.RoleListFilter) ([]*domain.Role, int64, error)
 	LockRolesFunc              func(ctx context.Context, uids []uuid.UUID) error
 	UpdateRoleNameFunc         func(ctx context.Context, roleID int64, name string) error
 	DeleteRoleFunc             func(ctx context.Context, roleID int64) error
@@ -121,6 +122,11 @@ func (r *fakeRepository) CreateRole(ctx context.Context, code, name string) (*do
 // ListRoles answers through ListRolesFunc.
 func (r *fakeRepository) ListRoles(ctx context.Context, uids []uuid.UUID, countUsers bool) ([]*domain.Role, error) {
 	return r.ListRolesFunc(ctx, uids, countUsers)
+}
+
+// ListRolesPage answers through ListRolesPageFunc.
+func (r *fakeRepository) ListRolesPage(ctx context.Context, filter domain.RoleListFilter) ([]*domain.Role, int64, error) {
+	return r.ListRolesPageFunc(ctx, filter)
 }
 
 // LockRoles answers through LockRolesFunc, or succeeds when it is nil.

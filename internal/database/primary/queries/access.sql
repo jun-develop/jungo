@@ -15,7 +15,8 @@ RETURNING *;
 
 -- name: ListRoles :many
 -- Every role, or only those in uuids when it is not null, with permissions; user_count is counted
--- only when count_users is true (0 otherwise), so lookups made under a lock skip the count.
+-- only when count_users is true (0 otherwise), so lookups made under a lock skip the count. It counts
+-- non-deleted users: a soft-deleted user keeps its user_roles rows.
 SELECT
     r.id, r.uuid, r.code, r.name, r.is_system, r.created_at, r.updated_at,
     COALESCE(
@@ -23,12 +24,44 @@ SELECT
         '{}'
     )::text[] AS permissions,
     CASE WHEN sqlc.arg(count_users)::boolean
-         THEN (SELECT count(*) FROM user_roles ur WHERE ur.role_id = r.id)
+         THEN (SELECT count(*) FROM user_roles ur JOIN users u ON u.id = ur.user_id
+               WHERE ur.role_id = r.id AND u.deleted_at IS NULL)
          ELSE 0
     END::bigint AS user_count
 FROM roles r
 WHERE sqlc.narg(uuids)::uuid[] IS NULL OR r.uuid = ANY(sqlc.narg(uuids)::uuid[])
 ORDER BY r.is_system DESC, r.code;
+
+-- name: ListRolesPage :many
+-- A page of roles with permissions and user count (non-deleted users), matching search on code or
+-- name, sorted by sort_by (name, code, created_at or user_count; ties broken by id).
+SELECT * FROM (
+    SELECT
+        r.id, r.uuid, r.code, r.name, r.is_system, r.created_at, r.updated_at,
+        COALESCE(
+            (SELECT array_agg(rp.permission_code ORDER BY rp.permission_code) FROM role_permissions rp WHERE rp.role_id = r.id),
+            '{}'
+        )::text[] AS permissions,
+        (SELECT count(*) FROM user_roles ur JOIN users u ON u.id = ur.user_id
+         WHERE ur.role_id = r.id AND u.deleted_at IS NULL)::bigint AS user_count
+    FROM roles r
+    WHERE sqlc.arg(search)::text = '' OR r.code ILIKE '%' || sqlc.arg(search) || '%' OR r.name ILIKE '%' || sqlc.arg(search) || '%'
+) page
+ORDER BY
+    CASE WHEN NOT sqlc.arg(descending)::bool THEN CASE sqlc.arg(sort_by)::text WHEN 'name' THEN page.name WHEN 'code' THEN page.code END END ASC,
+    CASE WHEN sqlc.arg(descending)::bool THEN CASE sqlc.arg(sort_by)::text WHEN 'name' THEN page.name WHEN 'code' THEN page.code END END DESC,
+    CASE WHEN NOT sqlc.arg(descending)::bool AND sqlc.arg(sort_by)::text = 'created_at' THEN page.created_at END ASC,
+    CASE WHEN sqlc.arg(descending)::bool AND sqlc.arg(sort_by)::text = 'created_at' THEN page.created_at END DESC,
+    CASE WHEN NOT sqlc.arg(descending)::bool AND sqlc.arg(sort_by)::text = 'user_count' THEN page.user_count END ASC,
+    CASE WHEN sqlc.arg(descending)::bool AND sqlc.arg(sort_by)::text = 'user_count' THEN page.user_count END DESC,
+    CASE WHEN NOT sqlc.arg(descending)::bool THEN page.id END ASC,
+    CASE WHEN sqlc.arg(descending)::bool THEN page.id END DESC
+LIMIT sqlc.arg('limit') OFFSET sqlc.arg('offset');
+
+-- name: CountRoles :one
+-- The roles ListRolesPage's search matches.
+SELECT count(*) FROM roles r
+WHERE sqlc.arg(search)::text = '' OR r.code ILIKE '%' || sqlc.arg(search) || '%' OR r.name ILIKE '%' || sqlc.arg(search) || '%';
 
 -- name: LockRoles :exec
 -- Locks the roles' rows until the transaction ends, in id order so two lockers cannot deadlock.

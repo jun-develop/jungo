@@ -44,6 +44,19 @@ func (q *Queries) AddUserRoles(ctx context.Context, arg AddUserRolesParams) erro
 	return err
 }
 
+const countRoles = `-- name: CountRoles :one
+SELECT count(*) FROM roles r
+WHERE $1::text = '' OR r.code ILIKE '%' || $1 || '%' OR r.name ILIKE '%' || $1 || '%'
+`
+
+// The roles ListRolesPage's search matches.
+func (q *Queries) CountRoles(ctx context.Context, search string) (int64, error) {
+	row := q.db.QueryRow(ctx, countRoles, search)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createRole = `-- name: CreateRole :one
 INSERT INTO roles (code, name) VALUES ($1, $2)
 RETURNING id, uuid, code, name, is_system, created_at, updated_at
@@ -172,7 +185,8 @@ SELECT
         '{}'
     )::text[] AS permissions,
     CASE WHEN $1::boolean
-         THEN (SELECT count(*) FROM user_roles ur WHERE ur.role_id = r.id)
+         THEN (SELECT count(*) FROM user_roles ur JOIN users u ON u.id = ur.user_id
+               WHERE ur.role_id = r.id AND u.deleted_at IS NULL)
          ELSE 0
     END::bigint AS user_count
 FROM roles r
@@ -198,7 +212,8 @@ type ListRolesRow struct {
 }
 
 // Every role, or only those in uuids when it is not null, with permissions; user_count is counted
-// only when count_users is true (0 otherwise), so lookups made under a lock skip the count.
+// only when count_users is true (0 otherwise), so lookups made under a lock skip the count. It counts
+// non-deleted users: a soft-deleted user keeps its user_roles rows.
 func (q *Queries) ListRoles(ctx context.Context, arg ListRolesParams) ([]ListRolesRow, error) {
 	rows, err := q.db.Query(ctx, listRoles, arg.CountUsers, arg.Uuids)
 	if err != nil {
@@ -208,6 +223,89 @@ func (q *Queries) ListRoles(ctx context.Context, arg ListRolesParams) ([]ListRol
 	items := []ListRolesRow{}
 	for rows.Next() {
 		var i ListRolesRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.UUID,
+			&i.Code,
+			&i.Name,
+			&i.IsSystem,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.Permissions,
+			&i.UserCount,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listRolesPage = `-- name: ListRolesPage :many
+SELECT id, uuid, code, name, is_system, created_at, updated_at, permissions, user_count FROM (
+    SELECT
+        r.id, r.uuid, r.code, r.name, r.is_system, r.created_at, r.updated_at,
+        COALESCE(
+            (SELECT array_agg(rp.permission_code ORDER BY rp.permission_code) FROM role_permissions rp WHERE rp.role_id = r.id),
+            '{}'
+        )::text[] AS permissions,
+        (SELECT count(*) FROM user_roles ur JOIN users u ON u.id = ur.user_id
+         WHERE ur.role_id = r.id AND u.deleted_at IS NULL)::bigint AS user_count
+    FROM roles r
+    WHERE $1::text = '' OR r.code ILIKE '%' || $1 || '%' OR r.name ILIKE '%' || $1 || '%'
+) page
+ORDER BY
+    CASE WHEN NOT $2::bool THEN CASE $3::text WHEN 'name' THEN page.name WHEN 'code' THEN page.code END END ASC,
+    CASE WHEN $2::bool THEN CASE $3::text WHEN 'name' THEN page.name WHEN 'code' THEN page.code END END DESC,
+    CASE WHEN NOT $2::bool AND $3::text = 'created_at' THEN page.created_at END ASC,
+    CASE WHEN $2::bool AND $3::text = 'created_at' THEN page.created_at END DESC,
+    CASE WHEN NOT $2::bool AND $3::text = 'user_count' THEN page.user_count END ASC,
+    CASE WHEN $2::bool AND $3::text = 'user_count' THEN page.user_count END DESC,
+    CASE WHEN NOT $2::bool THEN page.id END ASC,
+    CASE WHEN $2::bool THEN page.id END DESC
+LIMIT $5 OFFSET $4
+`
+
+type ListRolesPageParams struct {
+	Search     string `db:"search" json:"search"`
+	Descending bool   `db:"descending" json:"descending"`
+	SortBy     string `db:"sort_by" json:"sort_by"`
+	Offset     int32  `db:"offset" json:"offset"`
+	Limit      int32  `db:"limit" json:"limit"`
+}
+
+type ListRolesPageRow struct {
+	ID          int64      `db:"id" json:"id"`
+	UUID        uuid.UUID  `db:"uuid" json:"uuid"`
+	Code        string     `db:"code" json:"code"`
+	Name        string     `db:"name" json:"name"`
+	IsSystem    bool       `db:"is_system" json:"is_system"`
+	CreatedAt   time.Time  `db:"created_at" json:"created_at"`
+	UpdatedAt   *time.Time `db:"updated_at" json:"updated_at"`
+	Permissions []string   `db:"permissions" json:"permissions"`
+	UserCount   int64      `db:"user_count" json:"user_count"`
+}
+
+// A page of roles with permissions and user count (non-deleted users), matching search on code or
+// name, sorted by sort_by (name, code, created_at or user_count; ties broken by id).
+func (q *Queries) ListRolesPage(ctx context.Context, arg ListRolesPageParams) ([]ListRolesPageRow, error) {
+	rows, err := q.db.Query(ctx, listRolesPage,
+		arg.Search,
+		arg.Descending,
+		arg.SortBy,
+		arg.Offset,
+		arg.Limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListRolesPageRow{}
+	for rows.Next() {
+		var i ListRolesPageRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.UUID,

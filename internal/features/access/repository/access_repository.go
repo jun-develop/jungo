@@ -82,22 +82,49 @@ func (r *AccessRepository) ListRoles(ctx context.Context, uuids []uuid.UUID, cou
 		return nil, wrap("list roles", err)
 	}
 
-	items := make([]*domain.Role, len(rows))
-	for i, row := range rows {
-		items[i] = &domain.Role{
-			ID:          row.ID,
-			UUID:        row.UUID,
-			Code:        row.Code,
-			Name:        row.Name,
-			IsSystem:    row.IsSystem,
-			CreatedAt:   row.CreatedAt,
-			UpdatedAt:   row.UpdatedAt,
-			Permissions: row.Permissions,
-			UserCount:   row.UserCount,
-		}
+	return slicex.Map(rows, mapListedRole), nil
+}
+
+// ListRolesPage implements domain.AccessRepository.
+func (r *AccessRepository) ListRolesPage(ctx context.Context, filter domain.RoleListFilter) ([]*domain.Role, int64, error) {
+	queries := r.db.Queries(ctx)
+	search := database.EscapeLike(filter.Search)
+
+	rows, err := queries.ListRolesPage(ctx, sqlc.ListRolesPageParams{
+		Search: search, SortBy: filter.SortBy, Descending: filter.SortOrder != "asc", Limit: filter.Limit, Offset: filter.Offset,
+	})
+	if err != nil {
+		return nil, 0, wrap("list roles page", err)
 	}
 
-	return items, nil
+	roles := slicex.Map(rows, func(row sqlc.ListRolesPageRow) *domain.Role { return mapListedRole(sqlc.ListRolesRow(row)) })
+
+	// A short page that is not past the end is the last one, so it already gives the total.
+	if len(rows) < int(filter.Limit) && (len(rows) > 0 || filter.Offset == 0) {
+		return roles, int64(filter.Offset) + int64(len(rows)), nil
+	}
+
+	total, err := queries.CountRoles(ctx, search)
+	if err != nil {
+		return nil, 0, wrap("count roles", err)
+	}
+
+	return roles, total, nil
+}
+
+// mapListedRole converts a listed role row, with permissions and user count, to the domain model.
+func mapListedRole(row sqlc.ListRolesRow) *domain.Role {
+	return &domain.Role{
+		ID:          row.ID,
+		UUID:        row.UUID,
+		Code:        row.Code,
+		Name:        row.Name,
+		IsSystem:    row.IsSystem,
+		CreatedAt:   row.CreatedAt,
+		UpdatedAt:   row.UpdatedAt,
+		Permissions: row.Permissions,
+		UserCount:   row.UserCount,
+	}
 }
 
 // LockRoles implements domain.AccessRepository; it locks the roles' rows until the transaction in

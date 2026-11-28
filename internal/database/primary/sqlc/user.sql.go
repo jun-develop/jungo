@@ -15,10 +15,20 @@ const countUsers = `-- name: CountUsers :one
 SELECT count(*) FROM users
 WHERE deleted_at IS NULL
   AND ($1::text = '' OR email ILIKE '%' || $1 || '%' OR first_name ILIKE '%' || $1 || '%' OR last_name ILIKE '%' || $1 || '%')
+  AND ($2::smallint IS NULL OR status = $2)
+  AND ($3::uuid[] IS NULL OR EXISTS (
+      SELECT 1 FROM user_roles ur JOIN roles r ON r.id = ur.role_id
+      WHERE ur.user_id = users.id AND r.uuid = ANY($3::uuid[])))
 `
 
-func (q *Queries) CountUsers(ctx context.Context, search string) (int64, error) {
-	row := q.db.QueryRow(ctx, countUsers, search)
+type CountUsersParams struct {
+	Search    string      `db:"search" json:"search"`
+	Status    *int16      `db:"status" json:"status"`
+	RoleUuids []uuid.UUID `db:"role_uuids" json:"role_uuids"`
+}
+
+func (q *Queries) CountUsers(ctx context.Context, arg CountUsersParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countUsers, arg.Search, arg.Status, arg.RoleUuids)
 	var count int64
 	err := row.Scan(&count)
 	return count, err
@@ -138,22 +148,80 @@ func (q *Queries) GetUserIDByUUID(ctx context.Context, argUuid uuid.UUID) (int64
 	return id, err
 }
 
+const listRolesOfUsers = `-- name: ListRolesOfUsers :many
+SELECT u.uuid AS user_uuid, r.uuid, r.code, r.name, r.is_system
+FROM user_roles ur
+JOIN users u ON u.id = ur.user_id
+JOIN roles r ON r.id = ur.role_id
+WHERE u.uuid = ANY($1::uuid[])
+ORDER BY r.name, r.id
+`
+
+type ListRolesOfUsersRow struct {
+	UserUUID uuid.UUID `db:"user_uuid" json:"user_uuid"`
+	UUID     uuid.UUID `db:"uuid" json:"uuid"`
+	Code     string    `db:"code" json:"code"`
+	Name     string    `db:"name" json:"name"`
+	IsSystem bool      `db:"is_system" json:"is_system"`
+}
+
+// The roles of each user in user_uuids, by name, for the users of one page in one query.
+func (q *Queries) ListRolesOfUsers(ctx context.Context, userUuids []uuid.UUID) ([]ListRolesOfUsersRow, error) {
+	rows, err := q.db.Query(ctx, listRolesOfUsers, userUuids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListRolesOfUsersRow{}
+	for rows.Next() {
+		var i ListRolesOfUsersRow
+		if err := rows.Scan(
+			&i.UserUUID,
+			&i.UUID,
+			&i.Code,
+			&i.Name,
+			&i.IsSystem,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listUsersNewest = `-- name: ListUsersNewest :many
 SELECT id, uuid, email, password_hash, first_name, last_name, phone_number, avatar_url, status, created_at, updated_at, deleted_at FROM users
 WHERE deleted_at IS NULL
   AND ($1::text = '' OR email ILIKE '%' || $1 || '%' OR first_name ILIKE '%' || $1 || '%' OR last_name ILIKE '%' || $1 || '%')
+  AND ($2::smallint IS NULL OR status = $2)
+  AND ($3::uuid[] IS NULL OR EXISTS (
+      SELECT 1 FROM user_roles ur JOIN roles r ON r.id = ur.role_id
+      WHERE ur.user_id = users.id AND r.uuid = ANY($3::uuid[])))
 ORDER BY created_at DESC, id DESC
-LIMIT $3 OFFSET $2
+LIMIT $5 OFFSET $4
 `
 
 type ListUsersNewestParams struct {
-	Search string `db:"search" json:"search"`
-	Offset int32  `db:"offset" json:"offset"`
-	Limit  int32  `db:"limit" json:"limit"`
+	Search    string      `db:"search" json:"search"`
+	Status    *int16      `db:"status" json:"status"`
+	RoleUuids []uuid.UUID `db:"role_uuids" json:"role_uuids"`
+	Offset    int32       `db:"offset" json:"offset"`
+	Limit     int32       `db:"limit" json:"limit"`
 }
 
+// The list queries and CountUsers share one filter: search, status (NULL = any) and role_uuids
+// (NULL = any; otherwise users holding at least one of those roles).
 func (q *Queries) ListUsersNewest(ctx context.Context, arg ListUsersNewestParams) ([]User, error) {
-	rows, err := q.db.Query(ctx, listUsersNewest, arg.Search, arg.Offset, arg.Limit)
+	rows, err := q.db.Query(ctx, listUsersNewest,
+		arg.Search,
+		arg.Status,
+		arg.RoleUuids,
+		arg.Offset,
+		arg.Limit,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -189,18 +257,104 @@ const listUsersOldest = `-- name: ListUsersOldest :many
 SELECT id, uuid, email, password_hash, first_name, last_name, phone_number, avatar_url, status, created_at, updated_at, deleted_at FROM users
 WHERE deleted_at IS NULL
   AND ($1::text = '' OR email ILIKE '%' || $1 || '%' OR first_name ILIKE '%' || $1 || '%' OR last_name ILIKE '%' || $1 || '%')
+  AND ($2::smallint IS NULL OR status = $2)
+  AND ($3::uuid[] IS NULL OR EXISTS (
+      SELECT 1 FROM user_roles ur JOIN roles r ON r.id = ur.role_id
+      WHERE ur.user_id = users.id AND r.uuid = ANY($3::uuid[])))
 ORDER BY created_at, id
-LIMIT $3 OFFSET $2
+LIMIT $5 OFFSET $4
 `
 
 type ListUsersOldestParams struct {
-	Search string `db:"search" json:"search"`
-	Offset int32  `db:"offset" json:"offset"`
-	Limit  int32  `db:"limit" json:"limit"`
+	Search    string      `db:"search" json:"search"`
+	Status    *int16      `db:"status" json:"status"`
+	RoleUuids []uuid.UUID `db:"role_uuids" json:"role_uuids"`
+	Offset    int32       `db:"offset" json:"offset"`
+	Limit     int32       `db:"limit" json:"limit"`
 }
 
 func (q *Queries) ListUsersOldest(ctx context.Context, arg ListUsersOldestParams) ([]User, error) {
-	rows, err := q.db.Query(ctx, listUsersOldest, arg.Search, arg.Offset, arg.Limit)
+	rows, err := q.db.Query(ctx, listUsersOldest,
+		arg.Search,
+		arg.Status,
+		arg.RoleUuids,
+		arg.Offset,
+		arg.Limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []User{}
+	for rows.Next() {
+		var i User
+		if err := rows.Scan(
+			&i.ID,
+			&i.UUID,
+			&i.Email,
+			&i.PasswordHash,
+			&i.FirstName,
+			&i.LastName,
+			&i.PhoneNumber,
+			&i.AvatarURL,
+			&i.Status,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.DeletedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listUsersSorted = `-- name: ListUsersSorted :many
+SELECT id, uuid, email, password_hash, first_name, last_name, phone_number, avatar_url, status, created_at, updated_at, deleted_at FROM users
+WHERE deleted_at IS NULL
+  AND ($1::text = '' OR email ILIKE '%' || $1 || '%' OR first_name ILIKE '%' || $1 || '%' OR last_name ILIKE '%' || $1 || '%')
+  AND ($2::smallint IS NULL OR status = $2)
+  AND ($3::uuid[] IS NULL OR EXISTS (
+      SELECT 1 FROM user_roles ur JOIN roles r ON r.id = ur.role_id
+      WHERE ur.user_id = users.id AND r.uuid = ANY($3::uuid[])))
+ORDER BY
+    CASE WHEN NOT $4::bool THEN
+        CASE $5::text WHEN 'email' THEN email WHEN 'first_name' THEN first_name WHEN 'last_name' THEN last_name WHEN 'status' THEN status::text END
+    END ASC,
+    CASE WHEN $4::bool THEN
+        CASE $5::text WHEN 'email' THEN email WHEN 'first_name' THEN first_name WHEN 'last_name' THEN last_name WHEN 'status' THEN status::text END
+    END DESC,
+    CASE WHEN NOT $4::bool THEN id END ASC,
+    CASE WHEN $4::bool THEN id END DESC
+LIMIT $7 OFFSET $6
+`
+
+type ListUsersSortedParams struct {
+	Search     string      `db:"search" json:"search"`
+	Status     *int16      `db:"status" json:"status"`
+	RoleUuids  []uuid.UUID `db:"role_uuids" json:"role_uuids"`
+	Descending bool        `db:"descending" json:"descending"`
+	SortBy     string      `db:"sort_by" json:"sort_by"`
+	Offset     int32       `db:"offset" json:"offset"`
+	Limit      int32       `db:"limit" json:"limit"`
+}
+
+// Sorted by email, first_name, last_name or status (sort_by; status 1 = active sorts before 2 =
+// inactive, as their names do), ties broken by id. Sorting by created_at uses
+// ListUsersNewest/Oldest instead, which idx_users_active_created_at serves.
+func (q *Queries) ListUsersSorted(ctx context.Context, arg ListUsersSortedParams) ([]User, error) {
+	rows, err := q.db.Query(ctx, listUsersSorted,
+		arg.Search,
+		arg.Status,
+		arg.RoleUuids,
+		arg.Descending,
+		arg.SortBy,
+		arg.Offset,
+		arg.Limit,
+	)
 	if err != nil {
 		return nil, err
 	}

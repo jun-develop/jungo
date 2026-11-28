@@ -148,6 +148,30 @@ func (r *AuthRepository) RevokeAllForUser(ctx context.Context, userUUID uuid.UUI
 	return families, nil
 }
 
+// RevokeUserSession implements domain.AuthRepository.
+func (r *AuthRepository) RevokeUserSession(ctx context.Context, userID int64, familyUUID uuid.UUID, reason string) error {
+	n, err := r.db.Queries(ctx).RevokeUserSession(ctx, sqlc.RevokeUserSessionParams{UserID: userID, FamilyUUID: familyUUID, Reason: &reason})
+	if err != nil {
+		return wrap("revoke user session", err)
+	}
+
+	if n == 0 {
+		return domain.ErrSessionNotFound
+	}
+
+	return nil
+}
+
+// RevokeOtherSessions implements domain.AuthRepository.
+func (r *AuthRepository) RevokeOtherSessions(ctx context.Context, userID int64, keep uuid.UUID, reason string) ([]uuid.UUID, error) {
+	families, err := r.db.Queries(ctx).RevokeOtherSessions(ctx, sqlc.RevokeOtherSessionsParams{UserID: userID, KeepFamilyUUID: keep, Reason: &reason})
+	if err != nil {
+		return nil, wrap("revoke other sessions", err)
+	}
+
+	return families, nil
+}
+
 // ListActiveSessions implements domain.AuthRepository.
 func (r *AuthRepository) ListActiveSessions(ctx context.Context, userID int64) ([]*domain.SessionSummary, error) {
 	rows, err := r.db.Queries(ctx).ListActiveSessions(ctx, userID)
@@ -224,18 +248,19 @@ func (r *AuthRepository) ConsumePasswordResetToken(ctx context.Context, hash str
 // mapSession converts a generated sqlc.GetSessionByHashRow to the domain model.
 func mapSession(row sqlc.GetSessionByHashRow) *domain.Session {
 	return &domain.Session{
-		UserID:     row.UserID,
-		UserUUID:   row.UserUUID,
-		Email:      row.Email,
-		FirstName:  row.FirstName,
-		LastName:   row.LastName,
-		AvatarURL:  row.AvatarURL,
-		UserActive: row.UserActive,
-		FamilyUUID: row.FamilyUUID,
-		IPAddress:  formatIP(row.IPAddress),
-		UserAgent:  row.UserAgent,
-		DeviceID:   row.DeviceID,
-		CreatedAt:  row.SessionCreatedAt,
+		UserID:      row.UserID,
+		UserUUID:    row.UserUUID,
+		Email:       row.Email,
+		FirstName:   row.FirstName,
+		LastName:    row.LastName,
+		PhoneNumber: row.PhoneNumber,
+		AvatarURL:   row.AvatarURL,
+		UserActive:  row.UserActive,
+		FamilyUUID:  row.FamilyUUID,
+		IPAddress:   formatIP(row.IPAddress),
+		UserAgent:   row.UserAgent,
+		DeviceID:    row.DeviceID,
+		CreatedAt:   row.SessionCreatedAt,
 		Access: domain.TokenState{
 			UUID:      row.AccessUUID,
 			Hash:      row.AccessHash,

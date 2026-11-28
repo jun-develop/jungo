@@ -184,6 +184,7 @@ SELECT
     u.email,
     u.first_name,
     u.last_name,
+    u.phone_number,
     u.avatar_url,
     (u.status = 1)::boolean    AS user_active,
     tk.family_uuid,
@@ -213,6 +214,7 @@ type GetSessionByHashRow struct {
 	Email            string      `db:"email" json:"email"`
 	FirstName        string      `db:"first_name" json:"first_name"`
 	LastName         string      `db:"last_name" json:"last_name"`
+	PhoneNumber      *string     `db:"phone_number" json:"phone_number"`
 	AvatarURL        *string     `db:"avatar_url" json:"avatar_url"`
 	UserActive       bool        `db:"user_active" json:"user_active"`
 	FamilyUUID       uuid.UUID   `db:"family_uuid" json:"family_uuid"`
@@ -243,6 +245,7 @@ func (q *Queries) GetSessionByHash(ctx context.Context, hash string) (GetSession
 		&i.Email,
 		&i.FirstName,
 		&i.LastName,
+		&i.PhoneNumber,
 		&i.AvatarURL,
 		&i.UserActive,
 		&i.FamilyUUID,
@@ -478,4 +481,68 @@ func (q *Queries) RevokeFamilyByHash(ctx context.Context, arg RevokeFamilyByHash
 	var family_uuid uuid.UUID
 	err := row.Scan(&family_uuid)
 	return family_uuid, err
+}
+
+const revokeOtherSessions = `-- name: RevokeOtherSessions :many
+WITH revoked AS (
+    UPDATE auth_tokens t
+    SET revoked_at = now(), revoked_reason = $1
+    WHERE t.user_id = $2 AND t.family_uuid <> $3 AND t.revoked_at IS NULL
+    RETURNING t.family_uuid
+)
+SELECT DISTINCT family_uuid FROM revoked
+`
+
+type RevokeOtherSessionsParams struct {
+	Reason         *string   `db:"reason" json:"reason"`
+	UserID         int64     `db:"user_id" json:"user_id"`
+	KeepFamilyUUID uuid.UUID `db:"keep_family_uuid" json:"keep_family_uuid"`
+}
+
+// Revokes every session of user_id except keep_family_uuid and returns each revoked family once.
+func (q *Queries) RevokeOtherSessions(ctx context.Context, arg RevokeOtherSessionsParams) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, revokeOtherSessions, arg.Reason, arg.UserID, arg.KeepFamilyUUID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []uuid.UUID{}
+	for rows.Next() {
+		var family_uuid uuid.UUID
+		if err := rows.Scan(&family_uuid); err != nil {
+			return nil, err
+		}
+		items = append(items, family_uuid)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const revokeUserSession = `-- name: RevokeUserSession :execrows
+UPDATE auth_tokens t
+SET revoked_at = now(), revoked_reason = $1
+WHERE t.family_uuid = $2 AND t.revoked_at IS NULL
+  AND EXISTS (
+      SELECT 1 FROM auth_tokens r
+      WHERE r.family_uuid = $2 AND r.user_id = $3
+        AND r.type = 2 AND r.revoked_at IS NULL AND r.expires_at > now()
+  )
+`
+
+type RevokeUserSessionParams struct {
+	Reason     *string   `db:"reason" json:"reason"`
+	FamilyUUID uuid.UUID `db:"family_uuid" json:"family_uuid"`
+	UserID     int64     `db:"user_id" json:"user_id"`
+}
+
+// Revokes the session family_uuid if it is one of user_id's active sessions (as ListActiveSessions
+// lists them); no row means it is not theirs, does not exist or has already ended.
+func (q *Queries) RevokeUserSession(ctx context.Context, arg RevokeUserSessionParams) (int64, error) {
+	result, err := q.db.Exec(ctx, revokeUserSession, arg.Reason, arg.FamilyUUID, arg.UserID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }

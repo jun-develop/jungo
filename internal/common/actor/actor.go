@@ -7,6 +7,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/jun-develop/junkit/response"
+	"github.com/jun-develop/junkit/slicex"
 )
 
 // Errors the actor checks return.
@@ -14,6 +15,20 @@ var (
 	ErrForbidden                = response.New(response.Forbidden, "insufficient_permission")
 	ErrCannotManageStrongerUser = response.New(response.Forbidden, "cannot_manage_stronger_user")
 )
+
+// PermissionCode is a permission code in a request or response body, e.g. "users:read". The API docs
+// give it every code the features declare as its values, so clients can type it.
+type PermissionCode string
+
+// PermissionCodes converts codes for a response body; the result is never nil.
+func PermissionCodes(codes []string) []PermissionCode {
+	return slicex.Map(codes, func(c string) PermissionCode { return PermissionCode(c) })
+}
+
+// CodeStrings converts the codes of a request body back to the strings the domain uses.
+func CodeStrings(codes []PermissionCode) []string {
+	return slicex.Map(codes, func(c PermissionCode) string { return string(c) })
+}
 
 // Actor is the authenticated user of a request and the permission codes they hold.
 type Actor struct {

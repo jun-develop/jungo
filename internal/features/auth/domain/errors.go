@@ -21,6 +21,10 @@ var (
 	ErrTokenReused      = response.New(response.Unauthorized, "token_reused")
 	ErrTokenNotFound    = response.New(response.NotFound, "token_not_found")
 
+	ErrInvalidCurrentPassword   = response.New(response.BadRequest, "invalid_current_password")
+	ErrNewPasswordSameAsCurrent = response.New(response.UnprocessableEntity, "new_password_same_as_current")
+	ErrSessionNotFound          = response.New(response.NotFound, "session_not_found")
+
 	ErrInvalidResetToken        = response.New(response.BadRequest, "invalid_reset_token")
 	ErrTooManyResetRequests     = response.New(response.TooManyRequests, "too_many_password_reset_requests")
 	ErrPasswordResetUnavailable = response.New(response.Internal, "password_reset_unavailable")

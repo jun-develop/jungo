@@ -5,9 +5,11 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/jun-develop/junkit/pagination"
 	"github.com/jun-develop/junkit/response"
 	"github.com/jun-develop/junkit/validation"
 
+	"jungo/internal/common/actor"
 	"jungo/internal/features/access/domain"
 	v1dto "jungo/internal/features/access/dto/v1"
 )
@@ -37,13 +39,21 @@ func (h *AccessHandler) ListPermissions(ctx *gin.Context) {
 
 // ListRoles handles GET /roles.
 func (h *AccessHandler) ListRoles(ctx *gin.Context) {
-	roles, err := h.service.ListRoles(ctx.Request.Context())
+	var req v1dto.ListRolesRequest
+	if !validation.BindQuery(ctx, h.responder, h.validator, &req) {
+		return
+	}
+
+	req.SetDefaults()
+
+	roles, total, err := h.service.ListRoles(ctx.Request.Context(), v1dto.ToRoleListFilter(req))
 	if err != nil {
 		h.responder.Error(ctx, err)
 		return
 	}
 
-	h.responder.SendWithData(ctx, http.StatusOK, "roles_listed", v1dto.NewRoleResponseList(roles))
+	meta := pagination.NewPagination(req.Page, req.PageSize, total)
+	h.responder.Pagination(ctx, http.StatusOK, "roles_listed", v1dto.NewRoleResponseList(roles), meta)
 }
 
 // CreateRole handles POST /roles.
@@ -111,7 +121,7 @@ func (h *AccessHandler) ReplaceRolePermissions(ctx *gin.Context) {
 		return
 	}
 
-	role, err := h.service.ReplaceRolePermissions(ctx.Request.Context(), uid, req.Permissions)
+	role, err := h.service.ReplaceRolePermissions(ctx.Request.Context(), uid, actor.CodeStrings(req.Permissions))
 	if err != nil {
 		h.responder.Error(ctx, err)
 		return

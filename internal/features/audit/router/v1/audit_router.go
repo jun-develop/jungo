@@ -6,6 +6,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/jun-develop/junkit/apidoc"
+	"github.com/jun-develop/junkit/response"
 
 	"jungo/internal/features/audit/domain"
 	v1dto "jungo/internal/features/audit/dto/v1"
@@ -45,8 +46,10 @@ func (r *AuditRoutes) Register(group *gin.RouterGroup) {
 func (r *AuditRoutes) Docs() []apidoc.Route {
 	return []apidoc.Route{
 		{
-			Method: http.MethodGet, Path: "/audit-logs", Summary: "List audit entries, newest first",
-			Query: v1dto.ListAuditLogsRequest{}, Response: v1dto.AuditLogResponse{}, Paginated: true,
+			ID: "listAuditLogs", Method: http.MethodGet, Path: "/audit-logs", Summary: "List audit entries",
+			Description: "Newest first unless sort_order=asc. Each entry carries its actor and a label of its entity, so a client needs no other read to show it.",
+			Query:       v1dto.ListAuditLogsRequest{}, Response: v1dto.AuditLogResponse{}, Paginated: true,
+			Errors: []*response.AppError{domain.ErrEntityTypeRequired},
 		},
 	}
 }

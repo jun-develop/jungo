@@ -8,7 +8,7 @@ package service
 // Purpose: Func-field fakes of AuthRepository and UserProvider, shared fixtures, and
 //          newTestService, which builds an AuthService around them with a real sealer, hasher,
 //          session cache and login guard.
-// Used by: auth_service_test.go, password_reset_test.go
+// Used by: auth_service_test.go, password_reset_test.go, account_test.go
 //
 // =============================================================================
 
@@ -27,6 +27,7 @@ import (
 	"github.com/jun-develop/junkit/cache"
 	"github.com/jun-develop/junkit/security"
 
+	"jungo/internal/common/auditlog"
 	"jungo/internal/config"
 	"jungo/internal/features/auth/domain"
 	"jungo/internal/features/auth/infrastructure"
@@ -55,6 +56,8 @@ type fakeAuthRepository struct {
 	RevokeFamilyByHashFunc        func(ctx context.Context, hash, reason string) (uuid.UUID, error)
 	RevokeAllByHashFunc           func(ctx context.Context, hash, reason string) ([]uuid.UUID, error)
 	RevokeAllForUserFunc          func(ctx context.Context, userUUID uuid.UUID, reason string) ([]uuid.UUID, error)
+	RevokeUserSessionFunc         func(ctx context.Context, userID int64, familyUUID uuid.UUID, reason string) error
+	RevokeOtherSessionsFunc       func(ctx context.Context, userID int64, keep uuid.UUID, reason string) ([]uuid.UUID, error)
 	ListActiveSessionsFunc        func(ctx context.Context, userID int64) ([]*domain.SessionSummary, error)
 	CleanupTokensFunc             func(ctx context.Context, before time.Time) (int64, error)
 	CreatePasswordResetTokenFunc  func(ctx context.Context, userID int64, hash string, expiresAt time.Time) error
@@ -110,6 +113,16 @@ func (f *fakeAuthRepository) RevokeAllForUser(
 	ctx context.Context, userUUID uuid.UUID, reason string,
 ) ([]uuid.UUID, error) {
 	return f.RevokeAllForUserFunc(ctx, userUUID, reason)
+}
+
+// RevokeUserSession calls RevokeUserSessionFunc.
+func (f *fakeAuthRepository) RevokeUserSession(ctx context.Context, userID int64, familyUUID uuid.UUID, reason string) error {
+	return f.RevokeUserSessionFunc(ctx, userID, familyUUID, reason)
+}
+
+// RevokeOtherSessions calls RevokeOtherSessionsFunc.
+func (f *fakeAuthRepository) RevokeOtherSessions(ctx context.Context, userID int64, keep uuid.UUID, reason string) ([]uuid.UUID, error) {
+	return f.RevokeOtherSessionsFunc(ctx, userID, keep, reason)
 }
 
 // ListActiveSessions calls ListActiveSessionsFunc.
@@ -203,7 +216,7 @@ func testConfig() *config.Config {
 }
 
 // newTestService builds an AuthService from p. Dependencies p leaves nil get test defaults:
-// testConfig(), a no-op logger, a real token sealer, a bcrypt hasher at the minimum cost, and a
+// testConfig(), a no-op logger, an audit log that records nothing, a real token sealer, a bcrypt hasher at the minimum cost, and a
 // memory-backed session cache and login guard. The service clock reads testNow.
 func newTestService(t *testing.T, p AuthServiceParams) *AuthService {
 	t.Helper()
@@ -214,6 +227,10 @@ func newTestService(t *testing.T, p AuthServiceParams) *AuthService {
 
 	if p.Logger == nil {
 		p.Logger = zap.NewNop()
+	}
+
+	if p.Audit == nil {
+		p.Audit = auditlog.Nop{}
 	}
 
 	sealer, err := security.NewTokenSealer(security.Options{

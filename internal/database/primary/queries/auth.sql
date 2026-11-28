@@ -59,6 +59,7 @@ SELECT
     u.email,
     u.first_name,
     u.last_name,
+    u.phone_number,
     u.avatar_url,
     (u.status = 1)::boolean    AS user_active,
     tk.family_uuid,
@@ -181,3 +182,25 @@ RETURNING t.user_id, u.uuid AS user_uuid;
 -- name: CleanupPasswordResetTokens :execrows
 DELETE FROM password_reset_tokens
 WHERE expires_at < sqlc.arg(before) OR (used_at IS NOT NULL AND used_at < sqlc.arg(before));
+
+-- name: RevokeUserSession :execrows
+-- Revokes the session family_uuid if it is one of user_id's active sessions (as ListActiveSessions
+-- lists them); no row means it is not theirs, does not exist or has already ended.
+UPDATE auth_tokens t
+SET revoked_at = now(), revoked_reason = sqlc.arg(reason)
+WHERE t.family_uuid = sqlc.arg(family_uuid) AND t.revoked_at IS NULL
+  AND EXISTS (
+      SELECT 1 FROM auth_tokens r
+      WHERE r.family_uuid = sqlc.arg(family_uuid) AND r.user_id = sqlc.arg(user_id)
+        AND r.type = 2 AND r.revoked_at IS NULL AND r.expires_at > now()
+  );
+
+-- name: RevokeOtherSessions :many
+-- Revokes every session of user_id except keep_family_uuid and returns each revoked family once.
+WITH revoked AS (
+    UPDATE auth_tokens t
+    SET revoked_at = now(), revoked_reason = sqlc.arg(reason)
+    WHERE t.user_id = sqlc.arg(user_id) AND t.family_uuid <> sqlc.arg(keep_family_uuid) AND t.revoked_at IS NULL
+    RETURNING t.family_uuid
+)
+SELECT DISTINCT family_uuid FROM revoked;

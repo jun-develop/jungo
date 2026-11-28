@@ -40,7 +40,7 @@ type AuthToken struct {
 	DeviceID  *string     `db:"device_id" json:"device_id"`
 	ExpiresAt time.Time   `db:"expires_at" json:"expires_at"`
 	RevokedAt *time.Time  `db:"revoked_at" json:"revoked_at"`
-	// logout | refresh | reuse | rotated | admin | user_disabled | password_reset
+	// logout | refresh | reuse | rotated | admin | user_disabled | password_reset | password_change
 	RevokedReason *string    `db:"revoked_reason" json:"revoked_reason"`
 	CreatedAt     time.Time  `db:"created_at" json:"created_at"`
 	UpdatedAt     *time.Time `db:"updated_at" json:"updated_at"`
